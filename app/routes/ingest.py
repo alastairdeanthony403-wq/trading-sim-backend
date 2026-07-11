@@ -32,7 +32,7 @@ def ingest_scenarios():
             params={
                 "function": "TIME_SERIES_DAILY",
                 "symbol": symbol,
-                "outputsize": "full",
+                "outputsize": "compact",
                 "apikey": ALPHA_VANTAGE_KEY,
             },
             timeout=30,
@@ -46,14 +46,12 @@ def ingest_scenarios():
 
         # sort dates ascending
         dates = sorted(series.keys())
-        if len(dates) < 120:
+        if len(dates) < 100:
             created.append({"symbol": symbol, "status": "skipped", "detail": "not enough bars"})
             continue
 
-        # pick a random contiguous 100-bar window so content is anonymized (no real dates exposed)
-        max_start = len(dates) - 100
-        start_idx = random.randint(0, max_start)
-        window_dates = dates[start_idx:start_idx + 100]
+        # use the most recent 100 bars (compact tier only returns ~100)
+        window_dates = dates[-100:]
 
         scenario = Scenario(
             name_internal=f"{symbol}_{window_dates[0]}_{window_dates[-1]}",
