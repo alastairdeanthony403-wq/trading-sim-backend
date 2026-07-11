@@ -40,7 +40,8 @@ def ingest_scenarios():
         data = resp.json()
         series = data.get("Time Series (Daily)")
         if not series:
-            created.append({"symbol": symbol, "status": "failed", "detail": data.get("Note") or data.get("Error Message") or "no data"})
+            detail = data.get("Note") or data.get("Error Message") or data.get("Information") or str(data)[:300]
+            created.append({"symbol": symbol, "status": "failed", "detail": detail})
             continue
 
         # sort dates ascending
