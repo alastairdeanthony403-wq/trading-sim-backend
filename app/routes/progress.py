@@ -9,9 +9,15 @@ bp = Blueprint("progress", __name__)
 # Kept simple and hardcoded for MVP -- easy to expand later.
 LESSON_UNLOCKS = [
     {"id": "risk_basics", "threshold": 0},
+    {"id": "chart_reading_basics", "threshold": 5},
     {"id": "risk_management", "threshold": 15},
+    {"id": "market_structure", "threshold": 25},
     {"id": "session_concepts", "threshold": 35},
+    {"id": "supply_demand_zones", "threshold": 45},
+    {"id": "liquidity_concepts", "threshold": 55},
     {"id": "advanced_confluence", "threshold": 60},
+    {"id": "trade_journaling", "threshold": 70},
+    {"id": "psychology_discipline", "threshold": 80},
 ]
 
 TIER_UNLOCKS = [
