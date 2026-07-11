@@ -17,7 +17,10 @@ def create_app():
 
     db.init_app(app)
 
-    from app.routes import health
+    from app.models import scenario, session, progress
+
+    from app.routes import health, setup
     app.register_blueprint(health.bp)
+    app.register_blueprint(setup.bp)
 
     return app

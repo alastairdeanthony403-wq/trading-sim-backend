@@ -1,0 +1,48 @@
+from app import db
+from datetime import datetime, timezone
+
+class Session(db.Model):
+    __tablename__ = "sessions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(120), nullable=False)
+    scenario_id = db.Column(db.Integer, db.ForeignKey("scenarios.id"), nullable=False)
+    started_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    ended_at = db.Column(db.DateTime, nullable=True)
+    starting_balance = db.Column(db.Float, nullable=False, default=10000.0)
+    ending_balance = db.Column(db.Float, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default="in_progress")
+
+    trades = db.relationship("Trade", backref="session", lazy=True, cascade="all, delete-orphan")
+    score = db.relationship("SessionScore", backref="session", uselist=False, cascade="all, delete-orphan")
+
+
+class Trade(db.Model):
+    __tablename__ = "trades"
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.Integer, db.ForeignKey("sessions.id"), nullable=False)
+    bar_sequence_entered = db.Column(db.Integer, nullable=False)
+    bar_sequence_exited = db.Column(db.Integer, nullable=True)
+    direction = db.Column(db.String(10), nullable=False)  # long/short
+    size = db.Column(db.Float, nullable=False)
+    entry_price = db.Column(db.Float, nullable=False)
+    exit_price = db.Column(db.Float, nullable=True)
+    stop_loss = db.Column(db.Float, nullable=True)
+    take_profit = db.Column(db.Float, nullable=True)
+    pnl = db.Column(db.Float, nullable=True)
+    commission_paid = db.Column(db.Float, nullable=True, default=0.0)
+    slippage_applied = db.Column(db.Float, nullable=True, default=0.0)
+
+
+class SessionScore(db.Model):
+    __tablename__ = "session_scores"
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.Integer, db.ForeignKey("sessions.id"), nullable=False, unique=True)
+    total_return_pct = db.Column(db.Float, nullable=True)
+    sharpe_ratio = db.Column(db.Float, nullable=True)
+    max_drawdown_pct = db.Column(db.Float, nullable=True)
+    win_rate = db.Column(db.Float, nullable=True)
+    avg_r_multiple = db.Column(db.Float, nullable=True)
+    score_composite = db.Column(db.Float, nullable=True)
