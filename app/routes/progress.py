@@ -8,15 +8,22 @@ bp = Blueprint("progress", __name__)
 # Composite score thresholds that unlock new lesson content and scenario tiers.
 # Kept simple and hardcoded for MVP -- easy to expand later.
 LESSON_UNLOCKS = [
-    {"id": "risk_basics", "threshold": 0},
+    {"id": "how_markets_work", "threshold": 0},
+    {"id": "order_types", "threshold": 0},
     {"id": "chart_reading_basics", "threshold": 5},
-    {"id": "risk_management", "threshold": 15},
+    {"id": "support_resistance", "threshold": 10},
+    {"id": "trends_conditions", "threshold": 15},
+    {"id": "risk_basics", "threshold": 20},
     {"id": "market_structure", "threshold": 25},
-    {"id": "session_concepts", "threshold": 35},
+    {"id": "core_indicators", "threshold": 30},
+    {"id": "risk_management", "threshold": 35},
+    {"id": "session_concepts", "threshold": 40},
     {"id": "supply_demand_zones", "threshold": 45},
-    {"id": "liquidity_concepts", "threshold": 55},
-    {"id": "advanced_confluence", "threshold": 60},
-    {"id": "trade_journaling", "threshold": 70},
+    {"id": "liquidity_concepts", "threshold": 50},
+    {"id": "advanced_confluence", "threshold": 55},
+    {"id": "fundamentals_news", "threshold": 60},
+    {"id": "trade_journaling", "threshold": 65},
+    {"id": "trading_plan", "threshold": 70},
     {"id": "psychology_discipline", "threshold": 80},
 ]
 
