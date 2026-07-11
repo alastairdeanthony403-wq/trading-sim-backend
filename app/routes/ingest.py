@@ -10,8 +10,33 @@ bp = Blueprint("ingest", __name__)
 
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
 
-# A small curated set of tickers across asset feel (stocks only for MVP, free tier friendly)
 DEFAULT_SYMBOLS = ["IBM", "AAPL", "MSFT", "TSLA", "AMZN"]
+
+# maps our internal timeframe label -> Alpha Vantage request config
+TIMEFRAME_CONFIGS = {
+    "1D": {
+        "function": "TIME_SERIES_DAILY",
+        "series_key": "Time Series (Daily)",
+        "extra_params": {"outputsize": "compact"},
+    },
+    "1W": {
+        "function": "TIME_SERIES_WEEKLY",
+        "series_key": "Weekly Time Series",
+        "extra_params": {},
+    },
+    "60min": {
+        "function": "TIME_SERIES_INTRADAY",
+        "series_key": "Time Series (60min)",
+        "extra_params": {"interval": "60min", "outputsize": "compact"},
+    },
+    "15min": {
+        "function": "TIME_SERIES_INTRADAY",
+        "series_key": "Time Series (15min)",
+        "extra_params": {"interval": "15min", "outputsize": "compact"},
+    },
+}
+
+DEFAULT_TIMEFRAMES = ["1D"]
 
 
 @bp.route("/setup/ingest-scenarios", methods=["POST"])
@@ -24,61 +49,73 @@ def ingest_scenarios():
     if not ALPHA_VANTAGE_KEY:
         return jsonify({"error": "ALPHA_VANTAGE_KEY not set"}), 400
 
-    symbols = request.json.get("symbols", DEFAULT_SYMBOLS) if request.is_json else DEFAULT_SYMBOLS
+    body = request.get_json(silent=True) or {}
+    symbols = body.get("symbols", DEFAULT_SYMBOLS)
+    timeframes = body.get("timeframes", DEFAULT_TIMEFRAMES)
+
     created = []
 
-    for symbol in symbols:
-        time.sleep(13)  # free tier: ~5 calls/minute limit
-        resp = requests.get(
-            "https://www.alphavantage.co/query",
-            params={
-                "function": "TIME_SERIES_DAILY",
+    for timeframe in timeframes:
+        config = TIMEFRAME_CONFIGS.get(timeframe)
+        if not config:
+            created.append({"timeframe": timeframe, "status": "failed", "detail": "unknown timeframe"})
+            continue
+
+        for symbol in symbols:
+            time.sleep(13)  # free tier: ~5 calls/minute limit
+
+            params = {
+                "function": config["function"],
                 "symbol": symbol,
-                "outputsize": "compact",
                 "apikey": ALPHA_VANTAGE_KEY,
-            },
-            timeout=30,
-        )
-        data = resp.json()
-        series = data.get("Time Series (Daily)")
-        if not series:
-            detail = data.get("Note") or data.get("Error Message") or data.get("Information") or str(data)[:300]
-            created.append({"symbol": symbol, "status": "failed", "detail": detail})
-            continue
+                **config["extra_params"],
+            }
+            resp = requests.get("https://www.alphavantage.co/query", params=params, timeout=30)
+            data = resp.json()
+            series = data.get(config["series_key"])
 
-        # sort dates ascending
-        dates = sorted(series.keys())
-        if len(dates) < 100:
-            created.append({"symbol": symbol, "status": "skipped", "detail": "not enough bars"})
-            continue
+            if not series:
+                detail = data.get("Note") or data.get("Error Message") or data.get("Information") or str(data)[:300]
+                created.append({"symbol": symbol, "timeframe": timeframe, "status": "failed", "detail": detail})
+                continue
 
-        # use the most recent 100 bars (compact tier only returns ~100)
-        window_dates = dates[-100:]
+            dates = sorted(series.keys())
+            if len(dates) < 100:
+                created.append({"symbol": symbol, "timeframe": timeframe, "status": "skipped", "detail": "not enough bars"})
+                continue
 
-        scenario = Scenario(
-            name_internal=f"{symbol}_{window_dates[0]}_{window_dates[-1]}",
-            asset_class="equity",
-            timeframe="1D",
-            difficulty_tier=random.choice([1, 2]),
-            tags=["historical_daily"],
-            is_active=True,
-        )
-        db.session.add(scenario)
-        db.session.flush()  # get scenario.id before inserting bars
+            window_dates = dates[-100:]
 
-        for i, d in enumerate(window_dates):
-            bar = series[d]
-            db.session.add(ScenarioBar(
-                scenario_id=scenario.id,
-                bar_sequence=i,
-                open=float(bar["1. open"]),
-                high=float(bar["2. high"]),
-                low=float(bar["3. low"]),
-                close=float(bar["4. close"]),
-                volume=float(bar["5. volume"]),
-            ))
+            scenario = Scenario(
+                name_internal=f"{symbol}_{timeframe}_{window_dates[0]}_{window_dates[-1]}",
+                asset_class="equity",
+                timeframe=timeframe,
+                difficulty_tier=random.choice([1, 2]),
+                tags=["historical"],
+                is_active=True,
+            )
+            db.session.add(scenario)
+            db.session.flush()
 
-        db.session.commit()
-        created.append({"symbol": symbol, "status": "created", "scenario_id": scenario.id, "bars": len(window_dates)})
+            for i, d in enumerate(window_dates):
+                bar = series[d]
+                db.session.add(ScenarioBar(
+                    scenario_id=scenario.id,
+                    bar_sequence=i,
+                    open=float(bar["1. open"]),
+                    high=float(bar["2. high"]),
+                    low=float(bar["3. low"]),
+                    close=float(bar["4. close"]),
+                    volume=float(bar.get("5. volume", 0)),
+                ))
+
+            db.session.commit()
+            created.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "status": "created",
+                "scenario_id": scenario.id,
+                "bars": len(window_dates),
+            })
 
     return jsonify({"status": "ok", "results": created})
