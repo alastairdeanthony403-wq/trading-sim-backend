@@ -1,5 +1,6 @@
 import os
 import random
+import time
 import requests
 from flask import Blueprint, jsonify, request
 from app import db
@@ -27,6 +28,7 @@ def ingest_scenarios():
     created = []
 
     for symbol in symbols:
+        time.sleep(13)  # free tier: ~5 calls/minute limit
         resp = requests.get(
             "https://www.alphavantage.co/query",
             params={
