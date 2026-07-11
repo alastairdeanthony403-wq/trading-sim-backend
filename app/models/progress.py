@@ -6,6 +6,7 @@ class UserProgress(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(120), nullable=False, unique=True)
     unlocked_lessons = db.Column(db.ARRAY(db.String), default=list)
+    completed_lessons = db.Column(db.ARRAY(db.String), default=list)
     unlocked_scenario_tiers = db.Column(db.ARRAY(db.Integer), default=list)
     total_scenarios_completed = db.Column(db.Integer, default=0)
     best_composite_score = db.Column(db.Float, nullable=True)

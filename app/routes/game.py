@@ -213,6 +213,5 @@ def end_session(session_id):
         "win_rate": win_rate,
         "avg_r_multiple": avg_r_multiple,
         "score_composite": composite,
-        "newly_unlocked_lessons": progress.unlocked_lessons,
         "newly_unlocked_tiers": progress.unlocked_scenario_tiers,
     })

@@ -1,31 +1,55 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from app import db
 from app.models.progress import UserProgress, Leaderboard
 from app.models.scenario import Scenario
 
 bp = Blueprint("progress", __name__)
 
-# Composite score thresholds that unlock new lesson content and scenario tiers.
-# Kept simple and hardcoded for MVP -- easy to expand later.
-LESSON_UNLOCKS = [
-    {"id": "how_markets_work", "threshold": 0},
-    {"id": "order_types", "threshold": 0},
-    {"id": "chart_reading_basics", "threshold": 5},
-    {"id": "support_resistance", "threshold": 10},
-    {"id": "trends_conditions", "threshold": 15},
-    {"id": "risk_basics", "threshold": 20},
-    {"id": "market_structure", "threshold": 25},
-    {"id": "core_indicators", "threshold": 30},
-    {"id": "risk_management", "threshold": 35},
-    {"id": "session_concepts", "threshold": 40},
-    {"id": "supply_demand_zones", "threshold": 45},
-    {"id": "liquidity_concepts", "threshold": 50},
-    {"id": "advanced_confluence", "threshold": 55},
-    {"id": "fundamentals_news", "threshold": 60},
-    {"id": "trade_journaling", "threshold": 65},
-    {"id": "trading_plan", "threshold": 70},
-    {"id": "psychology_discipline", "threshold": 80},
+# The curriculum: an ordered list of units, each with ordered lessons.
+# Lessons unlock by completing the previous lesson (a proper learning path),
+# not by trading score. Each unit ends with a knowledge check.
+CURRICULUM = [
+    {
+        "unit": 1,
+        "title": "Foundations",
+        "lessons": ["how_markets_work", "order_types"],
+        "check": "check_foundations",
+    },
+    {
+        "unit": 2,
+        "title": "Reading the chart",
+        "lessons": ["chart_reading_basics", "support_resistance", "trends_conditions"],
+        "check": "check_reading",
+    },
+    {
+        "unit": 3,
+        "title": "Structure & zones",
+        "lessons": ["market_structure", "core_indicators", "supply_demand_zones", "liquidity_concepts"],
+        "check": "check_structure",
+    },
+    {
+        "unit": 4,
+        "title": "Risk & process",
+        "lessons": ["risk_basics", "risk_management", "session_concepts", "advanced_confluence", "fundamentals_news"],
+        "check": "check_risk",
+    },
+    {
+        "unit": 5,
+        "title": "Discipline",
+        "lessons": ["trade_journaling", "trading_plan", "psychology_discipline"],
+        "check": "check_discipline",
+    },
 ]
+
+# Flattened ordered list of all learning-path items (lessons + checks interleaved)
+def ordered_path():
+    path = []
+    for unit in CURRICULUM:
+        for lesson_id in unit["lessons"]:
+            path.append({"type": "lesson", "id": lesson_id, "unit": unit["unit"]})
+        path.append({"type": "check", "id": unit["check"], "unit": unit["unit"]})
+    return path
+
 
 TIER_UNLOCKS = [
     {"tier": 1, "threshold": 0},
@@ -38,7 +62,8 @@ def get_or_create_progress(user_id):
     if not progress:
         progress = UserProgress(
             user_id=user_id,
-            unlocked_lessons=[LESSON_UNLOCKS[0]["id"]],
+            unlocked_lessons=[],
+            completed_lessons=[],
             unlocked_scenario_tiers=[TIER_UNLOCKS[0]["tier"]],
             total_scenarios_completed=0,
             best_composite_score=None,
@@ -48,19 +73,59 @@ def get_or_create_progress(user_id):
     return progress
 
 
+def compute_next_item(completed):
+    """Return the first item in the ordered path that isn't completed yet."""
+    completed_set = set(completed or [])
+    for item in ordered_path():
+        if item["id"] not in completed_set:
+            return item
+    return None  # everything done
+
+
+@bp.route("/progress/<string:user_id>", methods=["GET"])
+def get_progress(user_id):
+    progress = get_or_create_progress(user_id)
+    completed = progress.completed_lessons or []
+    next_item = compute_next_item(completed)
+
+    return jsonify({
+        "user_id": progress.user_id,
+        "completed_lessons": completed,
+        "next_item": next_item,
+        "curriculum": CURRICULUM,
+        "ordered_path": ordered_path(),
+        "unlocked_scenario_tiers": progress.unlocked_scenario_tiers,
+        "total_scenarios_completed": progress.total_scenarios_completed,
+        "best_composite_score": progress.best_composite_score,
+        "all_tiers": TIER_UNLOCKS,
+    })
+
+
+@bp.route("/progress/<string:user_id>/complete", methods=["POST"])
+def mark_complete(user_id):
+    progress = get_or_create_progress(user_id)
+    body = request.get_json(force=True)
+    item_id = body["item_id"]
+
+    completed = set(progress.completed_lessons or [])
+    completed.add(item_id)
+    progress.completed_lessons = list(completed)
+    db.session.commit()
+
+    next_item = compute_next_item(progress.completed_lessons)
+    return jsonify({
+        "completed_lessons": progress.completed_lessons,
+        "next_item": next_item,
+    })
+
+
 def apply_score_to_progress(user_id, composite_score):
-    """Called after a session ends. Updates progress and unlocks."""
+    """Called after a trading session ends. Updates score + scenario tier unlocks."""
     progress = get_or_create_progress(user_id)
     progress.total_scenarios_completed = (progress.total_scenarios_completed or 0) + 1
 
     if progress.best_composite_score is None or composite_score > progress.best_composite_score:
         progress.best_composite_score = composite_score
-
-    unlocked_lessons = set(progress.unlocked_lessons or [])
-    for lesson in LESSON_UNLOCKS:
-        if progress.best_composite_score is not None and progress.best_composite_score >= lesson["threshold"]:
-            unlocked_lessons.add(lesson["id"])
-    progress.unlocked_lessons = list(unlocked_lessons)
 
     unlocked_tiers = set(progress.unlocked_scenario_tiers or [])
     for tier in TIER_UNLOCKS:
@@ -70,20 +135,6 @@ def apply_score_to_progress(user_id, composite_score):
 
     db.session.commit()
     return progress
-
-
-@bp.route("/progress/<string:user_id>", methods=["GET"])
-def get_progress(user_id):
-    progress = get_or_create_progress(user_id)
-    return jsonify({
-        "user_id": progress.user_id,
-        "unlocked_lessons": progress.unlocked_lessons,
-        "unlocked_scenario_tiers": progress.unlocked_scenario_tiers,
-        "total_scenarios_completed": progress.total_scenarios_completed,
-        "best_composite_score": progress.best_composite_score,
-        "all_lessons": LESSON_UNLOCKS,
-        "all_tiers": TIER_UNLOCKS,
-    })
 
 
 @bp.route("/scenarios/<int:scenario_id>/leaderboard", methods=["GET"])

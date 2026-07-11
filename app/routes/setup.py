@@ -13,3 +13,21 @@ def create_tables():
 
     db.create_all()
     return jsonify({"status": "ok", "message": "tables created"})
+
+
+@bp.route("/setup/migrate-completed-lessons", methods=["POST"])
+def migrate_completed_lessons():
+    provided_key = request.headers.get("X-Setup-Key")
+    expected_key = os.environ.get("SETUP_KEY")
+    if not expected_key or provided_key != expected_key:
+        return jsonify({"error": "unauthorized"}), 401
+
+    from sqlalchemy import text
+    try:
+        db.session.execute(text(
+            "ALTER TABLE user_progress ADD COLUMN IF NOT EXISTS completed_lessons VARCHAR[] DEFAULT '{}'"
+        ))
+        db.session.commit()
+        return jsonify({"status": "ok", "message": "completed_lessons column added"})
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)}), 500
