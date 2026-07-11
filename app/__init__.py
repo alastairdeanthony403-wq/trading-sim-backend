@@ -19,9 +19,10 @@ def create_app():
 
     from app.models import scenario, session, progress
 
-    from app.routes import health, setup, ingest
+    from app.routes import health, setup, ingest, game
     app.register_blueprint(health.bp)
     app.register_blueprint(setup.bp)
     app.register_blueprint(ingest.bp)
+    app.register_blueprint(game.bp)
 
     return app
