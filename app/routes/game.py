@@ -4,6 +4,8 @@ from flask import Blueprint, jsonify, request
 from app import db
 from app.models.scenario import Scenario, ScenarioBar
 from app.models.session import Session, Trade, SessionScore
+from app.models.progress import Leaderboard
+from app.routes.progress import apply_score_to_progress
 
 bp = Blueprint("game", __name__)
 
@@ -192,6 +194,16 @@ def end_session(session_id):
     session.ended_at = datetime.now(timezone.utc)
     db.session.commit()
 
+    progress = apply_score_to_progress(session.user_id, composite)
+
+    db.session.add(Leaderboard(
+        scenario_id=session.scenario_id,
+        user_id=session.user_id,
+        composite_score=composite,
+        achieved_at=datetime.now(timezone.utc),
+    ))
+    db.session.commit()
+
     return jsonify({
         "session_id": session.id,
         "ending_balance": ending_balance,
@@ -201,4 +213,6 @@ def end_session(session_id):
         "win_rate": win_rate,
         "avg_r_multiple": avg_r_multiple,
         "score_composite": composite,
+        "newly_unlocked_lessons": progress.unlocked_lessons,
+        "newly_unlocked_tiers": progress.unlocked_scenario_tiers,
     })
