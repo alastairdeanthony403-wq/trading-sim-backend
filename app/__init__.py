@@ -2,11 +2,13 @@ import os
 from dotenv import load_dotenv
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
 from flask_cors import CORS
 
 load_dotenv()
 
 db = SQLAlchemy()
+migrate = Migrate()
 
 def create_app():
     app = Flask(__name__)
@@ -19,7 +21,9 @@ def create_app():
 
     db.init_app(app)
 
-    from app.models import scenario, session, progress
+    # Import models before Migrate so Alembic autogenerate sees every table.
+    from app.models import scenario, session, progress  # noqa: F401
+    migrate.init_app(app, db)
 
     from app.routes import health, setup, ingest, game, progress
     app.register_blueprint(health.bp)
