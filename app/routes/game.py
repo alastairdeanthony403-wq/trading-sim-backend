@@ -6,6 +6,7 @@ from app.models.scenario import Scenario, ScenarioBar
 from app.models.session import Session, Trade, SessionScore
 from app.models.progress import Leaderboard
 from app.routes.progress import apply_score_to_progress
+from app.rules import evaluate_discipline
 
 bp = Blueprint("game", __name__)
 
@@ -451,11 +452,21 @@ def end_session(session_id):
     if r_multiples:
         avg_r_multiple = sum(r_multiples) / len(r_multiples)
 
-    # Composite score: weighted toward risk-adjusted performance, not raw return
-    composite = (sharpe * 40) + (total_return_pct * 0.5) - (max_dd * 0.5) + (win_rate * 0.2)
+    # Discipline sub-score (0..100) — risk control & process, not profit.
+    disc = evaluate_discipline(session)
+    discipline_score = disc["discipline_score"]
+
+    # Composite: risk-adjusted performance PLUS discipline. Discipline is
+    # centred at 50 and weighted 0.4, so a perfectly disciplined session adds
+    # +20 and a reckless one subtracts up to -20 — a reckless profit scores
+    # worse than a disciplined smaller gain (the core design principle).
+    #   composite = 40*Sharpe + 0.5*return% - 0.5*maxDD + 0.2*winRate
+    #             + 0.4*(discipline - 50)
+    composite = ((sharpe * 40) + (total_return_pct * 0.5) - (max_dd * 0.5)
+                 + (win_rate * 0.2) + (discipline_score - 50) * 0.4)
 
     # Bankruptcy overrides everything: a blown account scores 0 no matter what
-    # paper profit came before it. This is the flagship lesson.
+    # paper profit or discipline came before it. This is the flagship lesson.
     blown = session.status == "blown" or ending_balance <= 0
     if blown:
         composite = 0.0
@@ -468,6 +479,12 @@ def end_session(session_id):
         win_rate=win_rate,
         avg_r_multiple=avg_r_multiple,
         score_composite=composite,
+        discipline_score=discipline_score,
+        avg_risk_pct=disc["avg_risk_pct"],
+        no_stop_count=disc["no_stop_count"],
+        oversize_count=disc["oversize_count"],
+        revenge_count=disc["revenge_count"],
+        rule_violations=disc["rule_violations"],
     )
     db.session.add(score)
 
@@ -477,6 +494,13 @@ def end_session(session_id):
     db.session.commit()
 
     progress = apply_score_to_progress(session.user_id, composite)
+    # Discipline aggregates for the career system (Phase D).
+    progress.total_trades_all = (progress.total_trades_all or 0) + disc["trades_total"]
+    progress.trades_with_stops_all = (progress.trades_with_stops_all or 0) + disc["trades_with_stops"]
+    progress.blown_count = (progress.blown_count or 0) + (1 if blown else 0)
+    progress.sessions_scored = (progress.sessions_scored or 0) + 1
+    progress.discipline_sum = (progress.discipline_sum or 0.0) + discipline_score
+    db.session.add(progress)
 
     db.session.add(Leaderboard(
         scenario_id=session.scenario_id,
@@ -495,6 +519,7 @@ def end_session(session_id):
         "win_rate": win_rate,
         "avg_r_multiple": avg_r_multiple,
         "score_composite": composite,
+        "discipline": disc,
         "blown": blown,
         "post_mortem": _post_mortem(session),
         "newly_unlocked_tiers": progress.unlocked_scenario_tiers,

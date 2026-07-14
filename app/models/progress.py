@@ -11,6 +11,13 @@ class UserProgress(db.Model):
     total_scenarios_completed = db.Column(db.Integer, default=0)
     best_composite_score = db.Column(db.Float, nullable=True)
 
+    # ── Discipline aggregates (Phase B; consumed by Phase D career gates) ──
+    total_trades_all = db.Column(db.Integer, default=0, server_default="0")
+    trades_with_stops_all = db.Column(db.Integer, default=0, server_default="0")
+    blown_count = db.Column(db.Integer, default=0, server_default="0")
+    sessions_scored = db.Column(db.Integer, default=0, server_default="0")
+    discipline_sum = db.Column(db.Float, default=0.0, server_default="0")  # running total for avg
+
 
 class Leaderboard(db.Model):
     __tablename__ = "leaderboard"
