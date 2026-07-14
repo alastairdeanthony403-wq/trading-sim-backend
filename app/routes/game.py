@@ -7,6 +7,7 @@ from app.models.session import Session, Trade, SessionScore
 from app.models.progress import Leaderboard
 from app.routes.progress import apply_score_to_progress
 from app.rules import evaluate_discipline
+from app.coach import compute_replay, build_findings
 
 bp = Blueprint("game", __name__)
 
@@ -407,6 +408,28 @@ def advance(session_id):
         "blown": session.status == "blown",
         "margin_call": margin_call,
         "status": session.status,
+    })
+
+
+# ---------- Replay & coaching ----------
+
+@bp.route("/sessions/<int:session_id>/replay", methods=["GET"])
+def session_replay(session_id):
+    """Post-session review: per-trade R/MAE/MFE, chart markers, equity curve,
+    and rule-based coach findings. Works on any finished session."""
+    session = Session.query.get_or_404(session_id)
+    replay = compute_replay(session)
+    disc = evaluate_discipline(session)
+    findings = build_findings(session, disc, replay)
+    return jsonify({
+        "session_id": session.id,
+        "scenario_id": session.scenario_id,
+        "starting_balance": session.starting_balance,
+        "ending_balance": session.ending_balance,
+        "status": session.status,
+        "discipline": disc,
+        "coach": findings,
+        **replay,
     })
 
 
