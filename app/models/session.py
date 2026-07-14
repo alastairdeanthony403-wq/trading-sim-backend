@@ -65,3 +65,11 @@ class SessionScore(db.Model):
     win_rate = db.Column(db.Float, nullable=True)
     avg_r_multiple = db.Column(db.Float, nullable=True)
     score_composite = db.Column(db.Float, nullable=True)
+
+    # ── Discipline (Phase B) ──────────────────────────────────────────────
+    discipline_score = db.Column(db.Float, nullable=True)   # 0..100
+    avg_risk_pct = db.Column(db.Float, nullable=True)       # mean risk-per-trade, % of balance
+    no_stop_count = db.Column(db.Integer, nullable=True)    # trades opened with no stop
+    oversize_count = db.Column(db.Integer, nullable=True)   # trades risking > threshold
+    revenge_count = db.Column(db.Integer, nullable=True)    # revenge-trade pattern hits
+    rule_violations = db.Column(db.Integer, nullable=True)  # total discipline violations
