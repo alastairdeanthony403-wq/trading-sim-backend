@@ -7,7 +7,7 @@ from app.models.session import Session, Trade, SessionScore
 from app.models.progress import Leaderboard
 from app.routes.progress import apply_score_to_progress
 from app.rules import evaluate_discipline
-from app.coach import compute_replay, build_findings
+from app.coach import compute_replay, build_findings, llm_coach_enabled, llm_review
 
 bp = Blueprint("game", __name__)
 
@@ -429,8 +429,23 @@ def session_replay(session_id):
         "status": session.status,
         "discipline": disc,
         "coach": findings,
+        "llm_coach_enabled": llm_coach_enabled(),
         **replay,
     })
+
+
+@bp.route("/sessions/<int:session_id>/coach-llm", methods=["GET"])
+def session_coach_llm(session_id):
+    """Optional narrative LLM review — only does anything when COACH_LLM=on and
+    ANTHROPIC_API_KEY is set. Otherwise returns enabled=false and the client
+    just shows the rule-based coach."""
+    session = Session.query.get_or_404(session_id)
+    if not llm_coach_enabled():
+        return jsonify({"enabled": False, "review": None})
+    disc = evaluate_discipline(session)
+    replay = compute_replay(session)
+    review = llm_review(session, disc, replay)
+    return jsonify({"enabled": True, "review": review})
 
 
 # ---------- Scoring ----------

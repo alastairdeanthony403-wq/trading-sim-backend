@@ -6,6 +6,9 @@ from the bars the trade was open), an equity curve, and chart markers.
 build_findings() turns that + the discipline metrics into plain-English coaching
 notes, each linked to an academy lesson.
 """
+import os
+import json
+import requests
 from app.models.scenario import ScenarioBar
 
 
@@ -147,3 +150,66 @@ def build_findings(session, discipline, replay):
             "This is exactly the process to repeat.", "trade_journaling")
 
     return findings
+
+
+# ── Optional LLM coach (v2, flag-gated; OFF by default) ────────────────────
+# Enabled only when COACH_LLM=on AND ANTHROPIC_API_KEY is set. Sends an
+# aggregate, non-personal session summary (no user id, no raw account data) to
+# Claude for a short narrative review. The rule-based coach above is always the
+# default; this is additive.
+def llm_coach_enabled():
+    return os.environ.get("COACH_LLM") == "on" and bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def llm_review(session, discipline, replay):
+    if not llm_coach_enabled():
+        return None
+    start = session.starting_balance or 1.0
+    ending = session.ending_balance if session.ending_balance is not None else start
+    summary = {
+        "return_pct": round((ending - start) / start * 100.0, 2),
+        "blown": session.status == "blown",
+        "discipline_score": discipline["discipline_score"],
+        "trades_total": discipline["trades_total"],
+        "no_stop_count": discipline["no_stop_count"],
+        "oversize_count": discipline["oversize_count"],
+        "revenge_count": discipline["revenge_count"],
+        "trades": [
+            {"dir": t["direction"], "planned_r": t["planned_r"],
+             "achieved_r": t["achieved_r"], "reason": t["exit_reason"]}
+            for t in replay["trades"][:20]
+        ],
+    }
+    system = (
+        "You are a trading-practice coach for a simulator that teaches SKILL, not "
+        "profit. Give a short (<=120 words), specific, honest review of this "
+        "session's PROCESS and RISK DISCIPLINE. Never promise or imply "
+        "profitability, never give financial or investment advice, never say the "
+        "user will make money. Focus on stops, position sizing, risk per trade, "
+        "cutting winners / letting losers run, and emotional patterns like revenge "
+        "trading. Be encouraging but truthful; if the account blew up, be blunt "
+        "about why. Address the trader as 'you'."
+    )
+    model = os.environ.get("COACH_LLM_MODEL", "claude-haiku-4-5-20251001")
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model, "max_tokens": 320, "system": system,
+                "messages": [{"role": "user",
+                              "content": "Session summary (JSON):\n" + json.dumps(summary)}],
+            },
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            return None
+        parts = resp.json().get("content", [])
+        text = "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+        return text or None
+    except Exception:
+        return None

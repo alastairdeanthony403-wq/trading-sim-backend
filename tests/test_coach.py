@@ -84,7 +84,22 @@ def test_coach_praises_clean_session():
           all(f["severity"] != "warn" for f in coach))
 
 
-TESTS = ["test_mae_mfe_and_r", "test_coach_flags_no_stop", "test_coach_praises_clean_session"]
+def test_llm_coach_off_by_default():
+    os.environ.pop("COACH_LLM", None)
+    bars = [(100, 101, 99, 100)] * 3
+    s = _start(_scenario(bars))
+    t = client.post(f"/sessions/{s}/trades",
+                    json={"direction": "long", "size": 10, "bar_sequence": 0, "stop_loss": 99}).get_json()
+    client.post(f"/trades/{t['trade_id']}/close", json={"bar_sequence": 2})
+    client.post(f"/sessions/{s}/end")
+    rp = client.get(f"/sessions/{s}/replay").get_json()
+    check("replay reports llm coach disabled", rp["llm_coach_enabled"] is False)
+    llm = client.get(f"/sessions/{s}/coach-llm").get_json()
+    check("coach-llm endpoint returns disabled", llm["enabled"] is False and llm["review"] is None)
+
+
+TESTS = ["test_mae_mfe_and_r", "test_coach_flags_no_stop", "test_coach_praises_clean_session",
+         "test_llm_coach_off_by_default"]
 
 if __name__ == "__main__":
     failed = 0
