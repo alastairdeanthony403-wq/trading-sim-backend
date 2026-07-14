@@ -34,6 +34,23 @@ class Trade(db.Model):
     commission_paid = db.Column(db.Float, nullable=True, default=0.0)
     slippage_applied = db.Column(db.Float, nullable=True, default=0.0)
 
+    # ── Order engine (Phase A) ────────────────────────────────────────────
+    # status: "pending" (resting entry, not yet filled) → "open" → "closed".
+    status = db.Column(db.String(10), nullable=False, default="open", server_default="open")
+    # entry order type: market | limit | stop
+    order_type = db.Column(db.String(10), nullable=False, default="market", server_default="market")
+    # resting entry price for limit/stop entries (NULL for market)
+    entry_order_price = db.Column(db.Float, nullable=True)
+    # bar the order was created on (for scanning resting/working orders)
+    bar_sequence_created = db.Column(db.Integer, nullable=True)
+    # trailing stop: trail this distance behind the best price; the anchor is
+    # the high-water (long) / low-water (short) of closes since entry.
+    trail_distance = db.Column(db.Float, nullable=True)
+    trail_anchor = db.Column(db.Float, nullable=True)
+    # why the position closed: manual | stop_loss | take_profit |
+    # trailing_stop | liquidation
+    exit_reason = db.Column(db.String(20), nullable=True)
+
 
 class SessionScore(db.Model):
     __tablename__ = "session_scores"
