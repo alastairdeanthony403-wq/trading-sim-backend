@@ -105,7 +105,8 @@ def test_discipline_moves_composite():
 
 
 def test_user_aggregates_accumulate():
-    user = "agg_user"
+    import uuid
+    user = "agg_" + uuid.uuid4().hex[:8]   # fresh user so counts are deterministic
     s = _start(_scenario(FLAT), user=user)
     t1 = client.post(f"/sessions/{s}/trades",
                      json={"direction": "long", "size": 10, "bar_sequence": 0, "stop_loss": 99}).get_json()

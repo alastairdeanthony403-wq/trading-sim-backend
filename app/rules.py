@@ -78,3 +78,73 @@ def evaluate_discipline(session):
         "trades_total": len(closed),
         "trades_with_stops": sum(1 for t in closed if trade_risk_amount(t)[1]),
     }
+
+
+# ── Mission rule evaluation ────────────────────────────────────────────────
+# Rules are plain dicts: {"type": ..., "param": ..., "label": ...}. Evaluation
+# is pure so it can run live (HUD) on an in-progress session and finally on the
+# ended session. Unknown rule types never fail the player.
+def check_mission_rules(rules, ctx):
+    """ctx = {trades (closed), starting_balance, total_return_pct, max_dd,
+    discipline (dict), blown}. Returns (passed_bool, [{label, passed, type}])."""
+    trades = ctx["trades"]
+    start = ctx["starting_balance"] or 1.0
+    disc = ctx["discipline"]
+    results = []
+
+    def worst_risk_pct():
+        w = 0.0
+        for t in trades:
+            amt, _ = trade_risk_amount(t)
+            w = max(w, amt / start * 100.0)
+        return w
+
+    for r in (rules or []):
+        typ, p = r.get("type"), r.get("param")
+        label = r.get("label") or typ
+        if typ == "max_risk_pct_per_trade":
+            ok = worst_risk_pct() <= p if trades else True
+        elif typ == "max_drawdown_pct":
+            ok = ctx["max_dd"] <= p
+        elif typ == "require_stop_on_all":
+            ok = disc["no_stop_count"] == 0
+        elif typ == "min_return_pct":
+            ok = ctx["total_return_pct"] >= p
+        elif typ == "no_revenge":
+            ok = disc["revenge_count"] == 0
+        elif typ == "max_trades":
+            ok = len(trades) <= p
+        elif typ == "min_trades":
+            ok = len(trades) >= p
+        else:
+            ok = True
+        results.append({"label": label, "type": typ, "passed": bool(ok)})
+
+    # a blown account fails every mission, regardless of the individual rules
+    passed = (not ctx.get("blown")) and all(x["passed"] for x in results)
+    return passed, results
+
+
+def session_context(session, discipline):
+    """Build the ctx dict check_mission_rules() needs from a session."""
+    start = session.starting_balance or 1.0
+    closed = [t for t in session.trades if t.status == "closed" and t.pnl is not None]
+    total_pnl = sum(t.pnl for t in closed)
+    ending = start + total_pnl
+    total_return_pct = (ending - start) / start * 100.0
+    eq = start
+    peak = start
+    max_dd = 0.0
+    for t in sorted(closed, key=lambda t: (t.bar_sequence_exited or 0)):
+        eq += t.pnl
+        peak = max(peak, eq)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - eq) / peak * 100.0)
+    return {
+        "trades": closed,
+        "starting_balance": start,
+        "total_return_pct": total_return_pct,
+        "max_dd": max_dd,
+        "discipline": discipline,
+        "blown": session.status == "blown" or ending <= 0,
+    }
