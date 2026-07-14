@@ -59,75 +59,80 @@ def _effective_stop(trade, anchor):
         return fixed, False
 
 
-def _scan_open_exit(trade, bars):
-    """Scan bars (ascending, each with .bar_sequence/.open/.high/.low/.close,
-    only those AFTER entry and up to the playback point) for the first SL/TP/
-    trailing hit. Honours gap fills at the open. Returns (bar_seq, fill_price,
-    reason) or None; mutates trade.trail_anchor as it ratchets."""
+def _exit_on_bar(trade, b):
+    """Evaluate SL/TP/trailing for ONE bar. Returns (fill_price, reason) or
+    None; ratchets trade.trail_anchor when the position survives the bar.
+    Gap fills at the open; pessimistic stop-first on same-bar ties."""
     anchor = trade.trail_anchor if trade.trail_anchor is not None else trade.entry_price
     long = trade.direction == "long"
-    for b in bars:
-        stop, trailing = _effective_stop(trade, anchor)
-        stop_reason = "trailing_stop" if trailing else "stop_loss"
-        tp = trade.take_profit
-        o, h, l, c = b.open, b.high, b.low, b.close
-
-        if long:
-            # gap through a level at the open
-            if stop is not None and o <= stop:
-                return b.bar_sequence, o, stop_reason
-            if tp is not None and o >= tp:
-                return b.bar_sequence, o, "take_profit"
-            hit_stop = stop is not None and l <= stop
-            hit_tp = tp is not None and h >= tp
-            if hit_stop:                       # pessimistic: stop wins ties
-                trade.trail_anchor = anchor
-                return b.bar_sequence, stop, stop_reason
-            if hit_tp:
-                trade.trail_anchor = anchor
-                return b.bar_sequence, tp, "take_profit"
-            anchor = max(anchor, c)
-        else:
-            if stop is not None and o >= stop:
-                return b.bar_sequence, o, stop_reason
-            if tp is not None and o <= tp:
-                return b.bar_sequence, o, "take_profit"
-            hit_stop = stop is not None and h >= stop
-            hit_tp = tp is not None and l <= tp
-            if hit_stop:
-                trade.trail_anchor = anchor
-                return b.bar_sequence, stop, stop_reason
-            if hit_tp:
-                trade.trail_anchor = anchor
-                return b.bar_sequence, tp, "take_profit"
-            anchor = min(anchor, c)
-    trade.trail_anchor = anchor               # persist ratchet for next advance
+    stop, trailing = _effective_stop(trade, anchor)
+    stop_reason = "trailing_stop" if trailing else "stop_loss"
+    tp = trade.take_profit
+    o, h, l, c = b.open, b.high, b.low, b.close
+    if long:
+        if stop is not None and o <= stop:
+            return o, stop_reason
+        if tp is not None and o >= tp:
+            return o, "take_profit"
+        if stop is not None and l <= stop:
+            return stop, stop_reason
+        if tp is not None and h >= tp:
+            return tp, "take_profit"
+        trade.trail_anchor = max(anchor, c)
+    else:
+        if stop is not None and o >= stop:
+            return o, stop_reason
+        if tp is not None and o <= tp:
+            return o, "take_profit"
+        if stop is not None and h >= stop:
+            return stop, stop_reason
+        if tp is not None and l <= tp:
+            return tp, "take_profit"
+        trade.trail_anchor = min(anchor, c)
     return None
 
 
-def _scan_pending_fill(trade, bars):
-    """Scan bars for the fill of a resting limit/stop ENTRY order. Honours gap
-    fills at the open (better for limits, worse for stops). Returns
-    (bar_seq, fill_price) or None."""
+def _fill_on_bar(trade, b):
+    """Evaluate a resting limit/stop ENTRY for ONE bar (gap-aware). Returns the
+    fill price or None."""
     p = trade.entry_order_price
     if p is None:
         return None
     long = trade.direction == "long"
-    for b in bars:
-        o, h, l = b.open, b.high, b.low
-        if trade.order_type == "limit":
-            # buy limit fills when price trades down to p (or gaps below)
-            if long and (o <= p or l <= p):
-                return b.bar_sequence, min(o, p)
-            if not long and (o >= p or h >= p):
-                return b.bar_sequence, max(o, p)
-        elif trade.order_type == "stop":
-            # buy stop fills when price trades up to p (or gaps above)
-            if long and (o >= p or h >= p):
-                return b.bar_sequence, max(o, p)
-            if not long and (o <= p or l <= p):
-                return b.bar_sequence, min(o, p)
+    o, h, l = b.open, b.high, b.low
+    if trade.order_type == "limit":
+        if long and (o <= p or l <= p):
+            return min(o, p)
+        if not long and (o >= p or h >= p):
+            return max(o, p)
+    elif trade.order_type == "stop":
+        if long and (o >= p or h >= p):
+            return max(o, p)
+        if not long and (o <= p or l <= p):
+            return min(o, p)
     return None
+
+
+# ---------- Margin / liquidation ----------
+MAINTENANCE_FRACTION = 0.5    # maintenance margin = 50% of initial margin
+MARGIN_CALL_MULT = 1.5        # warn when equity < 1.5x maintenance
+
+
+def _notional(trade):
+    return abs(trade.entry_price) * trade.size
+
+
+def _used_margin(open_trades):
+    return sum(_notional(t) / (t.leverage or 1.0) for t in open_trades)
+
+
+def _maintenance_margin(open_trades):
+    return _used_margin(open_trades) * MAINTENANCE_FRACTION
+
+
+def _unrealised(trade, price):
+    diff = price - trade.entry_price
+    return diff * trade.size if trade.direction == "long" else -diff * trade.size
 
 
 # ---------- Scenario listing ----------
@@ -208,6 +213,7 @@ def _trade_dict(t):
         "stop_loss": t.stop_loss,
         "take_profit": t.take_profit,
         "trail_distance": t.trail_distance,
+        "leverage": t.leverage,
         "bar_sequence_entered": t.bar_sequence_entered,
         "bar_sequence_exited": t.bar_sequence_exited,
         "pnl": t.pnl,
@@ -228,19 +234,30 @@ def open_trade(session_id):
     order_type = body.get("order_type", "market")
     entry_order_price = body.get("entry_order_price")
     trail_distance = body.get("trail_distance")
+    leverage = max(1.0, min(float(body.get("leverage", 1.0) or 1.0), 125.0))
 
     bar = ScenarioBar.query.filter_by(scenario_id=session.scenario_id, bar_sequence=entry_bar_sequence).first_or_404()
 
     if order_type == "market":
         slip = bar.close * SLIPPAGE_PCT
         entry_price = bar.close + slip if direction == "long" else bar.close - slip
+        # Margin check: the new position's initial margin must fit within free
+        # equity. Leverage is what lets you take size beyond your cash.
+        opens_now = [t for t in session.trades if t.status == "open"]
+        realised_bal = session.starting_balance + sum(
+            (t.pnl or 0.0) for t in session.trades if t.status == "closed")
+        available = (realised_bal
+                     + sum(_unrealised(t, bar.close) for t in opens_now)
+                     - _used_margin(opens_now))
+        if (entry_price * size) / leverage > available + 1e-6:
+            return jsonify({"error": "Insufficient margin for this position size/leverage."}), 400
         trade = Trade(
             session_id=session.id,
             bar_sequence_entered=entry_bar_sequence,
             bar_sequence_created=entry_bar_sequence,
             direction=direction, size=size, entry_price=entry_price,
             stop_loss=stop_loss, take_profit=take_profit,
-            order_type="market", status="open",
+            order_type="market", status="open", leverage=leverage,
             trail_distance=trail_distance,
             trail_anchor=entry_price if trail_distance is not None else None,
             commission_paid=COMMISSION_PER_TRADE, slippage_applied=slip,
@@ -260,7 +277,7 @@ def open_trade(session_id):
         entry_price=float(entry_order_price),      # provisional
         entry_order_price=float(entry_order_price),
         stop_loss=stop_loss, take_profit=take_profit,
-        order_type=order_type, status="pending",
+        order_type=order_type, status="pending", leverage=leverage,
         trail_distance=trail_distance,
         commission_paid=COMMISSION_PER_TRADE, slippage_applied=0.0,
     )
@@ -321,40 +338,75 @@ def advance(session_id):
             .filter_by(scenario_id=session.scenario_id)
             .filter(ScenarioBar.bar_sequence <= up_to)
             .order_by(ScenarioBar.bar_sequence).all())
-    by_seq = {b.bar_sequence: b for b in bars}
     events = []
 
-    for trade in session.trades:
-        # 1) fill resting entry orders
-        if trade.status == "pending":
-            scan = [b for b in bars if b.bar_sequence >= (trade.bar_sequence_created or 0)]
-            fill = _scan_pending_fill(trade, scan)
-            if fill is None:
-                continue
-            fill_bar, fill_price = fill
-            slip = fill_price * SLIPPAGE_PCT
-            trade.entry_price = fill_price + slip if trade.direction == "long" else fill_price - slip
-            trade.slippage_applied = slip
-            trade.bar_sequence_entered = fill_bar
-            trade.status = "open"
-            if trade.trail_distance is not None:
-                trade.trail_anchor = trade.entry_price
-            events.append({"trade_id": trade.id, "event": "filled",
-                           "bar_sequence": fill_bar, "entry_price": trade.entry_price})
+    def realised():
+        return session.starting_balance + sum(
+            (t.pnl or 0.0) for t in session.trades if t.status == "closed")
 
-        # 2) evaluate SL/TP/trailing on open positions
-        if trade.status == "open":
-            scan = [b for b in bars if b.bar_sequence > trade.bar_sequence_entered]
-            exit_hit = _scan_open_exit(trade, scan)
-            if exit_hit is not None:
-                exit_bar, fill_price, reason = exit_hit
-                _settle_trade(trade, exit_bar, fill_price, reason)
-                events.append({"trade_id": trade.id, "event": "closed",
-                               "bar_sequence": exit_bar, "reason": reason,
-                               "exit_price": trade.exit_price, "pnl": trade.pnl})
+    # Bar-by-bar so margin is enforced account-wide as price moves.
+    for b in bars:
+        if session.status in ("blown", "complete"):
+            break
+
+        # 1) fill resting entries that are eligible on this bar
+        for t in session.trades:
+            if t.status == "pending" and (t.bar_sequence_created or 0) <= b.bar_sequence:
+                fp = _fill_on_bar(t, b)
+                if fp is None:
+                    continue
+                slip = fp * SLIPPAGE_PCT
+                t.entry_price = fp + slip if t.direction == "long" else fp - slip
+                t.slippage_applied = slip
+                t.bar_sequence_entered = b.bar_sequence
+                t.status = "open"
+                if t.trail_distance is not None:
+                    t.trail_anchor = t.entry_price
+                events.append({"trade_id": t.id, "event": "filled",
+                               "bar_sequence": b.bar_sequence, "entry_price": t.entry_price})
+
+        # 2) SL/TP/trailing exits (never on the entry bar itself)
+        for t in session.trades:
+            if t.status == "open" and b.bar_sequence > t.bar_sequence_entered:
+                hit = _exit_on_bar(t, b)
+                if hit is not None:
+                    price, reason = hit
+                    _settle_trade(t, b.bar_sequence, price, reason)
+                    events.append({"trade_id": t.id, "event": "closed",
+                                   "bar_sequence": b.bar_sequence, "reason": reason,
+                                   "exit_price": t.exit_price, "pnl": t.pnl})
+
+        # 3) mark-to-market + margin / liquidation (account-wide)
+        opens = [t for t in session.trades if t.status == "open"]
+        if opens:
+            equity = realised() + sum(_unrealised(t, b.close) for t in opens)
+            if equity <= _maintenance_margin(opens):
+                for t in opens:
+                    _settle_trade(t, b.bar_sequence, b.close, "liquidation")
+                    events.append({"trade_id": t.id, "event": "liquidated",
+                                   "bar_sequence": b.bar_sequence,
+                                   "exit_price": t.exit_price, "pnl": t.pnl})
+                if realised() <= 0:
+                    session.status = "blown"
+                    session.ending_balance = realised()
+                    events.append({"event": "blown", "bar_sequence": b.bar_sequence})
+
+    # margin-call warning at the latest mark (only while still exposed)
+    opens = [t for t in session.trades if t.status == "open"]
+    margin_call = False
+    if opens and bars:
+        equity_now = realised() + sum(_unrealised(t, bars[-1].close) for t in opens)
+        maint = _maintenance_margin(opens)
+        margin_call = maint < equity_now <= maint * MARGIN_CALL_MULT
 
     db.session.commit()
-    return jsonify({"events": events, "positions": [_trade_dict(t) for t in session.trades]})
+    return jsonify({
+        "events": events,
+        "positions": [_trade_dict(t) for t in session.trades],
+        "blown": session.status == "blown",
+        "margin_call": margin_call,
+        "status": session.status,
+    })
 
 
 # ---------- Scoring ----------
@@ -402,6 +454,12 @@ def end_session(session_id):
     # Composite score: weighted toward risk-adjusted performance, not raw return
     composite = (sharpe * 40) + (total_return_pct * 0.5) - (max_dd * 0.5) + (win_rate * 0.2)
 
+    # Bankruptcy overrides everything: a blown account scores 0 no matter what
+    # paper profit came before it. This is the flagship lesson.
+    blown = session.status == "blown" or ending_balance <= 0
+    if blown:
+        composite = 0.0
+
     score = SessionScore(
         session_id=session.id,
         total_return_pct=total_return_pct,
@@ -414,7 +472,7 @@ def end_session(session_id):
     db.session.add(score)
 
     session.ending_balance = ending_balance
-    session.status = "complete"
+    session.status = "blown" if blown else "complete"
     session.ended_at = datetime.now(timezone.utc)
     db.session.commit()
 
@@ -437,5 +495,56 @@ def end_session(session_id):
         "win_rate": win_rate,
         "avg_r_multiple": avg_r_multiple,
         "score_composite": composite,
+        "blown": blown,
+        "post_mortem": _post_mortem(session),
         "newly_unlocked_tiers": progress.unlocked_scenario_tiers,
     })
+
+
+def _post_mortem(session):
+    """Educational breakdown for the results / ACCOUNT BLOWN screen: the equity
+    curve, per-trade risk history, the trades that did the damage, and a
+    'what if every trade risked 1%' counterfactual."""
+    start = session.starting_balance
+    closed = sorted(
+        [t for t in session.trades if t.status == "closed" and t.pnl is not None],
+        key=lambda t: (t.bar_sequence_exited or 0))
+
+    def trade_risk(t):
+        if t.stop_loss and abs(t.entry_price - t.stop_loss) > 0:
+            return abs(t.entry_price - t.stop_loss) * t.size, True
+        return _notional(t), False   # no stop → the whole position is at risk
+
+    eq = start
+    equity_curve = [{"bar": None, "equity": round(start, 2)}]
+    risk_history = []
+    disciplined = start
+    budget = 0.01 * start            # 1% of starting balance per trade
+    for t in closed:
+        eq += t.pnl
+        equity_curve.append({"bar": t.bar_sequence_exited, "equity": round(eq, 2)})
+        risk_amt, had_stop = trade_risk(t)
+        risk_history.append({
+            "bar": t.bar_sequence_exited,
+            "risk_pct": round(risk_amt / start * 100, 2) if start else 0,
+            "had_stop": had_stop,
+            "pnl": round(t.pnl, 2),
+        })
+        if risk_amt > 0:
+            disciplined += (t.pnl / risk_amt) * budget
+
+    worst = [t for t in sorted(closed, key=lambda t: t.pnl) if t.pnl < 0][:3]
+    worst_trades = [{
+        "bar_entered": t.bar_sequence_entered,
+        "bar_exited": t.bar_sequence_exited,
+        "direction": t.direction, "size": t.size, "leverage": t.leverage,
+        "pnl": round(t.pnl, 2), "exit_reason": t.exit_reason,
+    } for t in worst]
+
+    return {
+        "equity_curve": equity_curve,
+        "risk_history": risk_history,
+        "worst_trades": worst_trades,
+        "disciplined_ending_balance": round(disciplined, 2),
+        "disciplined_note": "If every trade had risked just 1% of your starting balance",
+    }

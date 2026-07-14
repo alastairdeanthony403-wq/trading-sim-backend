@@ -50,6 +50,8 @@ class Trade(db.Model):
     # why the position closed: manual | stop_loss | take_profit |
     # trailing_stop | liquidation
     exit_reason = db.Column(db.String(20), nullable=True)
+    # leverage used (1 = cash). Margin required = notional / leverage.
+    leverage = db.Column(db.Float, nullable=False, default=1.0, server_default="1")
 
 
 class SessionScore(db.Model):
