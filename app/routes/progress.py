@@ -57,6 +57,32 @@ TIER_UNLOCKS = [
 ]
 
 
+# Progressive interface complexity: which simulator tools are unlocked at each
+# level. Server-side so it's tunable, and so unlocks can't be forged by the
+# client. Interim gating is keyed off scenarios completed; Phase D's career
+# system will replace `_tool_level` with the real requirement matrix while
+# keeping this same tool vocabulary + endpoint contract.
+#   sl_tp | limit_stop | trailing | multi_position | leverage
+TOOL_TIERS = [
+    {"level": 1, "min_scenarios": 0,  "tools": []},
+    {"level": 2, "min_scenarios": 1,  "tools": ["sl_tp"]},
+    {"level": 3, "min_scenarios": 3,  "tools": ["sl_tp", "limit_stop"]},
+    {"level": 4, "min_scenarios": 5,  "tools": ["sl_tp", "limit_stop", "trailing"]},
+    {"level": 5, "min_scenarios": 8,  "tools": ["sl_tp", "limit_stop", "trailing", "multi_position"]},
+    {"level": 6, "min_scenarios": 12, "tools": ["sl_tp", "limit_stop", "trailing", "multi_position", "leverage"]},
+]
+
+
+def _tool_level(progress):
+    """(unlocked_tools, level) for a user's progress."""
+    n = (progress.total_scenarios_completed or 0)
+    tools, level = [], 1
+    for tier in TOOL_TIERS:
+        if n >= tier["min_scenarios"]:
+            tools, level = tier["tools"], tier["level"]
+    return tools, level
+
+
 def get_or_create_progress(user_id):
     progress = UserProgress.query.filter_by(user_id=user_id).first()
     if not progress:
@@ -87,6 +113,7 @@ def get_progress(user_id):
     progress = get_or_create_progress(user_id)
     completed = progress.completed_lessons or []
     next_item = compute_next_item(completed)
+    unlocked_tools, tool_level = _tool_level(progress)
 
     return jsonify({
         "user_id": progress.user_id,
@@ -98,6 +125,21 @@ def get_progress(user_id):
         "total_scenarios_completed": progress.total_scenarios_completed,
         "best_composite_score": progress.best_composite_score,
         "all_tiers": TIER_UNLOCKS,
+        "unlocked_tools": unlocked_tools,
+        "tool_level": tool_level,
+    })
+
+
+@bp.route("/config/tools/<string:user_id>", methods=["GET"])
+def get_tools(user_id):
+    """Server-authoritative list of unlocked simulator tools for this user."""
+    progress = get_or_create_progress(user_id)
+    unlocked_tools, tool_level = _tool_level(progress)
+    return jsonify({
+        "user_id": user_id,
+        "unlocked_tools": unlocked_tools,
+        "tool_level": tool_level,
+        "tool_tiers": TOOL_TIERS,
     })
 
 
