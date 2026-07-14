@@ -57,30 +57,119 @@ TIER_UNLOCKS = [
 ]
 
 
-# Progressive interface complexity: which simulator tools are unlocked at each
-# level. Server-side so it's tunable, and so unlocks can't be forged by the
-# client. Interim gating is keyed off scenarios completed; Phase D's career
-# system will replace `_tool_level` with the real requirement matrix while
-# keeping this same tool vocabulary + endpoint contract.
-#   sl_tp | limit_stop | trailing | multi_position | leverage
-TOOL_TIERS = [
-    {"level": 1, "min_scenarios": 0,  "tools": []},
-    {"level": 2, "min_scenarios": 1,  "tools": ["sl_tp"]},
-    {"level": 3, "min_scenarios": 3,  "tools": ["sl_tp", "limit_stop"]},
-    {"level": 4, "min_scenarios": 5,  "tools": ["sl_tp", "limit_stop", "trailing"]},
-    {"level": 5, "min_scenarios": 8,  "tools": ["sl_tp", "limit_stop", "trailing", "multi_position"]},
-    {"level": 6, "min_scenarios": 12, "tools": ["sl_tp", "limit_stop", "trailing", "multi_position", "leverage"]},
+# ═══════════════════════════════════════════════════════════════════════════
+# CAREER SYSTEM (Phase D) — the primary progression. SKILL-gated, never profit.
+# One server-side config drives career level, which in turn drives which tools
+# and which markets are unlocked. Requirements combine academy completion,
+# missions passed, and discipline aggregates (see UserProgress) — deliberately
+# NOT total P&L, so a reckless profitable run does not advance a career.
+# ═══════════════════════════════════════════════════════════════════════════
+CAREER_LEVELS = [
+    {"level": 1, "key": "market_rookie",       "name": "Market Rookie",       "requires": {}},
+    {"level": 2, "key": "junior_trader",       "name": "Junior Trader",       "requires": {"sessions_scored": 3, "missions_passed": 1}},
+    {"level": 3, "key": "market_analyst",      "name": "Market Analyst",      "requires": {"lessons_completed": 6, "missions_passed": 3, "pct_trades_with_stops": 0.70}},
+    {"level": 4, "key": "portfolio_trader",    "name": "Portfolio Trader",    "requires": {"missions_passed": 6, "avg_discipline": 70, "pct_trades_with_stops": 0.80}},
+    {"level": 5, "key": "professional_trader", "name": "Professional Trader", "requires": {"lessons_completed": 12, "missions_passed": 9, "avg_discipline": 80, "pct_trades_with_stops": 0.90}},
+    {"level": 6, "key": "fund_manager",        "name": "Fund Manager",        "requires": {"missions_passed": 12, "avg_discipline": 85, "pct_trades_with_stops": 0.90}},
+    {"level": 7, "key": "market_strategist",   "name": "Market Strategist",   "requires": {"lessons_completed": 17, "missions_passed": 15, "avg_discipline": 90, "pct_trades_with_stops": 0.95}},
 ]
+
+REQ_LABELS = {
+    "sessions_scored": "Sessions completed",
+    "missions_passed": "Missions passed",
+    "lessons_completed": "Lessons completed",
+    "pct_trades_with_stops": "Share of trades with a stop",
+    "avg_discipline": "Average discipline score",
+}
+
+# tools unlocked at each career level (cumulative)
+TOOL_UNLOCKS_BY_LEVEL = {
+    1: [],
+    2: ["sl_tp"],
+    3: ["sl_tp", "limit_stop"],
+    4: ["sl_tp", "limit_stop", "trailing", "multi_position"],
+    5: ["sl_tp", "limit_stop", "trailing", "multi_position", "leverage"],
+}
+
+# asset class → minimum career level to trade it
+MARKET_UNLOCKS = {"stocks": 1, "crypto": 2, "forex": 3, "indices": 4, "commodities": 5}
+
+
+def _career_metrics(user_id, progress):
+    from app.models.mission import MissionAttempt
+    lesson_ids = set()
+    for unit in CURRICULUM:
+        lesson_ids.update(unit["lessons"])
+    completed = set(progress.completed_lessons or [])
+    passed_missions = {a.mission_id for a in
+                       MissionAttempt.query.filter_by(user_id=user_id, passed=True).all()}
+    total_trades = progress.total_trades_all or 0
+    sessions = progress.sessions_scored or 0
+    return {
+        "lessons_completed": len(lesson_ids & completed),
+        "missions_passed": len(passed_missions),
+        "sessions_scored": sessions,
+        "pct_trades_with_stops": ((progress.trades_with_stops_all or 0) / total_trades)
+                                 if total_trades else 1.0,
+        "avg_discipline": ((progress.discipline_sum or 0.0) / sessions) if sessions else 0.0,
+        "blown_count": progress.blown_count or 0,
+    }
+
+
+def _level_met(reqs, metrics):
+    return all(metrics.get(k, 0) >= target for k, target in reqs.items())
+
+
+def _career_level(metrics):
+    level = CAREER_LEVELS[0]
+    for tier in CAREER_LEVELS[1:]:
+        if _level_met(tier["requires"], metrics):
+            level = tier
+        else:
+            break   # requirements are monotonic — stop at the first unmet tier
+    return level
+
+
+def _next_tier(level):
+    for tier in CAREER_LEVELS:
+        if tier["level"] == level + 1:
+            return tier
+    return None
+
+
+def _tools_for_level(level):
+    tools = []
+    for lvl in range(1, level + 1):
+        if lvl in TOOL_UNLOCKS_BY_LEVEL:
+            tools = TOOL_UNLOCKS_BY_LEVEL[lvl]
+    return tools
+
+
+def _unlocked_markets(level):
+    return [m for m, req in MARKET_UNLOCKS.items() if level >= req]
+
+
+def _requirements_view(tier, metrics):
+    out = []
+    for k, target in tier["requires"].items():
+        cur = metrics.get(k, 0)
+        out.append({
+            "key": k, "label": REQ_LABELS.get(k, k),
+            "current": round(cur, 2) if isinstance(cur, float) else cur,
+            "target": target, "met": cur >= target,
+        })
+    return out
+
+
+def _level_unlocks(level):
+    return {"tools": _tools_for_level(level), "markets": _unlocked_markets(level)}
 
 
 def _tool_level(progress):
-    """(unlocked_tools, level) for a user's progress."""
-    n = (progress.total_scenarios_completed or 0)
-    tools, level = [], 1
-    for tier in TOOL_TIERS:
-        if n >= tier["min_scenarios"]:
-            tools, level = tier["tools"], tier["level"]
-    return tools, level
+    """(unlocked_tools, career_level) — tool gating now follows career level."""
+    metrics = _career_metrics(progress.user_id, progress)
+    level = _career_level(metrics)["level"]
+    return _tools_for_level(level), level
 
 
 def get_or_create_progress(user_id):
@@ -139,7 +228,34 @@ def get_tools(user_id):
         "user_id": user_id,
         "unlocked_tools": unlocked_tools,
         "tool_level": tool_level,
-        "tool_tiers": TOOL_TIERS,
+        "unlocked_markets": _unlocked_markets(tool_level),
+    })
+
+
+@bp.route("/career/<string:user_id>", methods=["GET"])
+def get_career(user_id):
+    """Career level, the checklist to the next level, and what each level
+    unlocks. Server-authoritative and skill-gated."""
+    progress = get_or_create_progress(user_id)
+    metrics = _career_metrics(user_id, progress)
+    current = _career_level(metrics)
+    nxt = _next_tier(current["level"])
+    return jsonify({
+        "user_id": user_id,
+        "level": current["level"], "key": current["key"], "name": current["name"],
+        "metrics": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in metrics.items()},
+        "unlocked_tools": _tools_for_level(current["level"]),
+        "unlocked_markets": _unlocked_markets(current["level"]),
+        "next": None if not nxt else {
+            "level": nxt["level"], "name": nxt["name"],
+            "requirements": _requirements_view(nxt, metrics),
+            "unlocks": _level_unlocks(nxt["level"]),
+        },
+        "all_levels": [
+            {"level": t["level"], "name": t["name"], "key": t["key"],
+             "unlocks": _level_unlocks(t["level"])}
+            for t in CAREER_LEVELS
+        ],
     })
 
 
