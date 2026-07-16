@@ -14,7 +14,11 @@ def test_new_user_is_rookie():
     c = client.get(f"/career/{u}").get_json()
     check("new user is level 1", c["level"] == 1 and c["key"] == "market_rookie")
     check("rookie tools empty", c["unlocked_tools"] == [])
-    check("rookie market is stocks only", c["unlocked_markets"] == ["stocks"])
+    # entry level trades equities only ("stocks"/"equity" are the same market);
+    # crypto/forex/indices/commodities stay locked.
+    check("rookie has the equities market", "stocks" in c["unlocked_markets"])
+    check("rookie has only entry-level markets",
+          set(c["unlocked_markets"]) <= {"stocks", "equity"})
     check("next level shown with requirements", c["next"]["level"] == 2 and len(c["next"]["requirements"]) >= 1)
 
 def test_progress_advances_career():

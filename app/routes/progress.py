@@ -91,8 +91,9 @@ TOOL_UNLOCKS_BY_LEVEL = {
     5: ["sl_tp", "limit_stop", "trailing", "multi_position", "leverage"],
 }
 
-# asset class → minimum career level to trade it
-MARKET_UNLOCKS = {"stocks": 1, "crypto": 2, "forex": 3, "indices": 4, "commodities": 5}
+# asset class → minimum career level to trade it. "equity" and "stocks" are the
+# same entry-level market (ingest tags equities as "equity").
+MARKET_UNLOCKS = {"stocks": 1, "equity": 1, "crypto": 2, "forex": 3, "indices": 4, "commodities": 5}
 
 
 def _career_metrics(user_id, progress):
