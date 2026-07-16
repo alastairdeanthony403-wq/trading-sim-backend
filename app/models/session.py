@@ -12,6 +12,8 @@ class Session(db.Model):
     starting_balance = db.Column(db.Float, nullable=False, default=10000.0)
     ending_balance = db.Column(db.Float, nullable=True)
     status = db.Column(db.String(20), nullable=False, default="in_progress")
+    # "standard" | "fund_manager" (client-money rules: 1% risk cap, 8% max DD)
+    mode = db.Column(db.String(20), nullable=False, default="standard", server_default="standard")
 
     trades = db.relationship("Trade", backref="session", lazy=True, cascade="all, delete-orphan")
     score = db.relationship("SessionScore", backref="session", uselist=False, cascade="all, delete-orphan")

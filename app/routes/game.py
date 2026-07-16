@@ -14,6 +14,45 @@ bp = Blueprint("game", __name__)
 COMMISSION_PER_TRADE = 1.0      # flat fee per trade, in $
 SLIPPAGE_PCT = 0.0005           # 0.05% of price, applied on entry and exit
 
+# Per-asset-class cost models (Phase D). Crypto has the widest spread/slippage,
+# indices the tightest. Falls back to the defaults above for unknown classes.
+ASSET_COST_MODELS = {
+    "crypto":      {"slippage_pct": 0.0010, "commission": 1.0},
+    "forex":       {"slippage_pct": 0.0002, "commission": 0.5},
+    "indices":     {"slippage_pct": 0.0001, "commission": 0.5},
+    "commodities": {"slippage_pct": 0.0004, "commission": 1.0},
+    "stocks":      {"slippage_pct": 0.0005, "commission": 1.0},
+    "equity":      {"slippage_pct": 0.0005, "commission": 1.0},
+}
+
+# Fund Manager (client-money) rules
+FM_MAX_RISK_PCT = 1.0           # no single trade may risk more than 1% of the fund
+FM_MAX_DRAWDOWN_PCT = 8.0       # lose more than 8% of the fund → the client fires you
+CONCENTRATION_LIMIT = 0.60      # >60% of total open risk in one position = concentrated
+
+
+def _cost_model(session):
+    sc = Scenario.query.get(session.scenario_id)
+    ac = sc.asset_class if sc else "stocks"
+    return ASSET_COST_MODELS.get(ac, {"slippage_pct": SLIPPAGE_PCT, "commission": COMMISSION_PER_TRADE})
+
+
+def _fm_risk_check(session, direction, entry_price, stop_loss, size):
+    """Fund Manager mode gate applied at order time: client money must have a
+    defined stop and may risk no more than FM_MAX_RISK_PCT of the fund. Returns
+    an error string to reject with, or None when the trade is allowed."""
+    if getattr(session, "mode", "standard") != "fund_manager":
+        return None
+    if stop_loss is None:
+        return "Fund Manager mode: every trade must have a stop-loss (client money)."
+    risk_amt = abs(float(entry_price) - float(stop_loss)) * size
+    max_risk = FM_MAX_RISK_PCT / 100.0 * session.starting_balance
+    if risk_amt > max_risk + 1e-6:
+        return (f"Fund Manager mode: this trade risks "
+                f"{risk_amt / session.starting_balance * 100:.2f}% of the fund; "
+                f"the per-trade limit is {FM_MAX_RISK_PCT:.0f}%.")
+    return None
+
 
 # ======================================================================
 # ORDER EXECUTION ENGINE (Phase A)
@@ -24,14 +63,10 @@ SLIPPAGE_PCT = 0.0005           # 0.05% of price, applied on entry and exit
 # we scan the elapsed bars and fill/close orders deterministically.
 # ======================================================================
 
-def _exit_slippage(price):
-    return price * SLIPPAGE_PCT
-
-
-def _settle_trade(trade, exit_bar, fill_price, reason):
+def _settle_trade(trade, exit_bar, fill_price, reason, slip_pct=SLIPPAGE_PCT):
     """Close an open trade at fill_price (pre-slippage), applying adverse
     slippage + commission, and record why it closed."""
-    slip = _exit_slippage(fill_price)
+    slip = fill_price * slip_pct
     exit_price = fill_price - slip if trade.direction == "long" else fill_price + slip
     raw_pnl = (exit_price - trade.entry_price) * trade.size if trade.direction == "long" \
         else (trade.entry_price - exit_price) * trade.size
@@ -137,11 +172,39 @@ def _unrealised(trade, price):
     return diff * trade.size if trade.direction == "long" else -diff * trade.size
 
 
+def _open_risk(trade):
+    """$ at risk on an open position: distance to stop × size, or the full
+    notional when there is no stop (the whole position can be lost)."""
+    if trade.stop_loss is not None and abs(trade.entry_price - trade.stop_loss) > 0:
+        return abs(trade.entry_price - trade.stop_loss) * trade.size
+    return _notional(trade)
+
+
+def _is_concentrated(open_trades):
+    """True when a single open position carries more than CONCENTRATION_LIMIT of
+    the portfolio's total open risk — a diversification warning for the client."""
+    if len(open_trades) < 2:
+        return False
+    risks = [_open_risk(t) for t in open_trades]
+    total = sum(risks)
+    return total > 0 and max(risks) / total > CONCENTRATION_LIMIT
+
+
 # ---------- Scenario listing ----------
 
 @bp.route("/scenarios", methods=["GET"])
 def list_scenarios():
     scenarios = Scenario.query.filter_by(is_active=True).all()
+    # Optional career market-gating: when a user_id is supplied, annotate each
+    # scenario with whether that user's career level has unlocked its market.
+    user_id = request.args.get("user_id")
+    unlocked_markets = None
+    if user_id:
+        from app.routes.progress import (get_or_create_progress, _tool_level,
+                                          _unlocked_markets)
+        progress = get_or_create_progress(user_id)
+        _tools, level = _tool_level(progress)
+        unlocked_markets = set(_unlocked_markets(level))
     return jsonify([
         {
             "id": s.id,
@@ -150,6 +213,8 @@ def list_scenarios():
             "difficulty_tier": s.difficulty_tier,
             "tags": s.tags,
             "bar_count": len(s.bars),
+            "market_unlocked": (unlocked_markets is None
+                                or s.asset_class in unlocked_markets),
         }
         for s in scenarios
     ])
@@ -162,6 +227,7 @@ def start_session(scenario_id):
     body = request.get_json(silent=True) or {}
     user_id = body.get("user_id", "anonymous")
     starting_balance = body.get("starting_balance", 10000.0)
+    mode = "fund_manager" if body.get("mode") == "fund_manager" else "standard"
 
     scenario = Scenario.query.get_or_404(scenario_id)
 
@@ -170,11 +236,13 @@ def start_session(scenario_id):
         scenario_id=scenario.id,
         starting_balance=starting_balance,
         status="in_progress",
+        mode=mode,
     )
     db.session.add(session)
     db.session.commit()
 
-    return jsonify({"session_id": session.id, "scenario_id": scenario.id, "starting_balance": starting_balance})
+    return jsonify({"session_id": session.id, "scenario_id": scenario.id,
+                    "starting_balance": starting_balance, "mode": mode})
 
 
 @bp.route("/sessions/<int:session_id>/bars", methods=["GET"])
@@ -239,10 +307,15 @@ def open_trade(session_id):
     leverage = max(1.0, min(float(body.get("leverage", 1.0) or 1.0), 125.0))
 
     bar = ScenarioBar.query.filter_by(scenario_id=session.scenario_id, bar_sequence=entry_bar_sequence).first_or_404()
+    cm = _cost_model(session)
 
     if order_type == "market":
-        slip = bar.close * SLIPPAGE_PCT
+        slip = bar.close * cm["slippage_pct"]
         entry_price = bar.close + slip if direction == "long" else bar.close - slip
+        # Fund Manager client-money gate (stop required, ≤1% risk).
+        fm_err = _fm_risk_check(session, direction, entry_price, stop_loss, size)
+        if fm_err:
+            return jsonify({"error": fm_err}), 400
         # Margin check: the new position's initial margin must fit within free
         # equity. Leverage is what lets you take size beyond your cash.
         opens_now = [t for t in session.trades if t.status == "open"]
@@ -262,7 +335,7 @@ def open_trade(session_id):
             order_type="market", status="open", leverage=leverage,
             trail_distance=trail_distance,
             trail_anchor=entry_price if trail_distance is not None else None,
-            commission_paid=COMMISSION_PER_TRADE, slippage_applied=slip,
+            commission_paid=cm["commission"], slippage_applied=slip,
         )
         db.session.add(trade)
         db.session.commit()
@@ -271,6 +344,9 @@ def open_trade(session_id):
     # Resting entry order (limit/stop) — not filled until price touches it.
     if entry_order_price is None:
         return jsonify({"error": "entry_order_price required for limit/stop orders"}), 400
+    fm_err = _fm_risk_check(session, direction, float(entry_order_price), stop_loss, size)
+    if fm_err:
+        return jsonify({"error": fm_err}), 400
     trade = Trade(
         session_id=session.id,
         bar_sequence_entered=entry_bar_sequence,   # provisional; set on fill
@@ -281,7 +357,7 @@ def open_trade(session_id):
         stop_loss=stop_loss, take_profit=take_profit,
         order_type=order_type, status="pending", leverage=leverage,
         trail_distance=trail_distance,
-        commission_paid=COMMISSION_PER_TRADE, slippage_applied=0.0,
+        commission_paid=cm["commission"], slippage_applied=0.0,
     )
     db.session.add(trade)
     db.session.commit()
@@ -303,7 +379,7 @@ def close_trade(trade_id):
         return jsonify({"trade_id": trade.id, "exit_price": trade.exit_price, "pnl": trade.pnl})
 
     bar = ScenarioBar.query.filter_by(scenario_id=trade.session.scenario_id, bar_sequence=exit_bar_sequence).first_or_404()
-    _settle_trade(trade, exit_bar_sequence, bar.close, "manual")
+    _settle_trade(trade, exit_bar_sequence, bar.close, "manual", _cost_model(trade.session)["slippage_pct"])
     db.session.commit()
     return jsonify({"trade_id": trade.id, "exit_price": trade.exit_price, "pnl": trade.pnl})
 
@@ -335,6 +411,7 @@ def advance(session_id):
     bar re-derives the same fills, since closed/filled state is persisted."""
     session = Session.query.get_or_404(session_id)
     up_to = int((request.get_json(force=True) or {}).get("bar_sequence"))
+    slip_pct = _cost_model(session)["slippage_pct"]
 
     bars = (ScenarioBar.query
             .filter_by(scenario_id=session.scenario_id)
@@ -357,7 +434,7 @@ def advance(session_id):
                 fp = _fill_on_bar(t, b)
                 if fp is None:
                     continue
-                slip = fp * SLIPPAGE_PCT
+                slip = fp * slip_pct
                 t.entry_price = fp + slip if t.direction == "long" else fp - slip
                 t.slippage_applied = slip
                 t.bar_sequence_entered = b.bar_sequence
@@ -373,7 +450,7 @@ def advance(session_id):
                 hit = _exit_on_bar(t, b)
                 if hit is not None:
                     price, reason = hit
-                    _settle_trade(t, b.bar_sequence, price, reason)
+                    _settle_trade(t, b.bar_sequence, price, reason, slip_pct)
                     events.append({"trade_id": t.id, "event": "closed",
                                    "bar_sequence": b.bar_sequence, "reason": reason,
                                    "exit_price": t.exit_price, "pnl": t.pnl})
@@ -384,7 +461,7 @@ def advance(session_id):
             equity = realised() + sum(_unrealised(t, b.close) for t in opens)
             if equity <= _maintenance_margin(opens):
                 for t in opens:
-                    _settle_trade(t, b.bar_sequence, b.close, "liquidation")
+                    _settle_trade(t, b.bar_sequence, b.close, "liquidation", slip_pct)
                     events.append({"trade_id": t.id, "event": "liquidated",
                                    "bar_sequence": b.bar_sequence,
                                    "exit_price": t.exit_price, "pnl": t.pnl})
@@ -392,6 +469,23 @@ def advance(session_id):
                     session.status = "blown"
                     session.ending_balance = realised()
                     events.append({"event": "blown", "bar_sequence": b.bar_sequence})
+
+        # 3b) Fund Manager mandate: an 8% drawdown on client money ends it —
+        # flatten everything and fail the session (the client fires you).
+        if session.mode == "fund_manager" and session.status not in ("blown", "complete"):
+            opens = [t for t in session.trades if t.status == "open"]
+            equity_fm = realised() + sum(_unrealised(t, b.close) for t in opens)
+            floor = session.starting_balance * (1 - FM_MAX_DRAWDOWN_PCT / 100.0)
+            if equity_fm <= floor:
+                for t in opens:
+                    _settle_trade(t, b.bar_sequence, b.close, "fund_drawdown", slip_pct)
+                    events.append({"trade_id": t.id, "event": "closed",
+                                   "bar_sequence": b.bar_sequence, "reason": "fund_drawdown",
+                                   "exit_price": t.exit_price, "pnl": t.pnl})
+                session.status = "blown"
+                session.ending_balance = realised()
+                events.append({"event": "fund_fired", "bar_sequence": b.bar_sequence,
+                               "drawdown_pct": FM_MAX_DRAWDOWN_PCT})
 
     # margin-call warning at the latest mark (only while still exposed)
     opens = [t for t in session.trades if t.status == "open"]
@@ -407,6 +501,7 @@ def advance(session_id):
         "positions": [_trade_dict(t) for t in session.trades],
         "blown": session.status == "blown",
         "margin_call": margin_call,
+        "concentrated": _is_concentrated(opens),
         "status": session.status,
     })
 
