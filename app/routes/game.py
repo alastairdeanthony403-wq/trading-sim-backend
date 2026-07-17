@@ -277,6 +277,28 @@ def get_bars(session_id):
     ])
 
 
+@bp.route("/sessions/<int:session_id>/events", methods=["GET"])
+def get_events(session_id):
+    """Scripted news events for the session's scenario, ordered by bar. The
+    client reveals each one as playback reaches its bar (the price reaction is
+    already baked into the bars, so it stays server-authoritative)."""
+    from app.models.event import ScenarioEvent
+    session = Session.query.get_or_404(session_id)
+    events = (ScenarioEvent.query
+              .filter_by(scenario_id=session.scenario_id)
+              .order_by(ScenarioEvent.bar_sequence).all())
+    return jsonify([
+        {
+            "bar_sequence": e.bar_sequence,
+            "category": e.category,
+            "headline": e.headline,
+            "detail": e.detail,
+            "sentiment": e.sentiment,
+        }
+        for e in events
+    ])
+
+
 # ---------- Trading ----------
 
 def _trade_dict(t):

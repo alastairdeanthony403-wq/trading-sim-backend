@@ -22,7 +22,7 @@ def create_app():
     db.init_app(app)
 
     # Import models before Migrate so Alembic autogenerate sees every table.
-    from app.models import scenario, session, progress, mission  # noqa: F401
+    from app.models import scenario, session, progress, mission, event  # noqa: F401
     migrate.init_app(app, db)
 
     from app.routes import health, setup, ingest, game, progress, missions

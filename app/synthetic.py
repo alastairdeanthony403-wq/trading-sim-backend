@@ -64,12 +64,19 @@ def _phase_plan(regime, n, rng):
     return ["range"] * n
 
 
-def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0):
+def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
+                    events=None):
     """Generate an OHLCV series for a headline regime. Deterministic for a given
     seed. Guarantees positive prices and OHLC consistency
-    (low <= min(o,c) <= max(o,c) <= high)."""
+    (low <= min(o,c) <= max(o,c) <= high).
+
+    `events` (optional) is a list of {bar, sentiment, impact} dicts — a scripted
+    news reaction: at the event bar the price jumps by sentiment*impact and
+    volatility spikes for the following few bars (the whipsaw the lessons teach).
+    """
     rng = random.Random(seed)
     plan = _phase_plan(regime, n_bars, rng)
+    ev_by_bar = {int(e["bar"]): e for e in (events or [])}
 
     bars = []
     price = float(start_price)
@@ -96,6 +103,13 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0):
         # occasional jump/gap
         if rng.random() < p["jump_p"]:
             log_ret += p["jump"] * (0.5 + rng.random())
+
+        # scripted news reaction: a signed shock + a volatility spike/whipsaw
+        ev = ev_by_bar.get(i)
+        if ev is not None:
+            log_ret += ev.get("sentiment", 0) * ev.get("impact", 0.05)
+            sigma *= 2.2
+            vol_mult = max(vol_mult, 2.4)
 
         open_ = price
         # small gap between bars sometimes (open away from prior close)
@@ -137,3 +151,61 @@ def make_scenario_spec(regime, seed):
         "difficulty_tier": tier,
         "tags": ["synthetic", regime],
     }
+
+
+# ── News events (Phase E step 2) ──────────────────────────────────────────
+# Clearly-fictional headlines. Each has a category, a sentiment (+1 bullish /
+# -1 bearish), and a rough reaction size. Copy is neutral/educational — it
+# describes what markets do, never "how to profit".
+NEWS_TEMPLATES = [
+    {"category": "rate_decision", "sentiment": -1, "impact": 0.055,
+     "headline": "Central bank hikes rates more than expected",
+     "detail": "Policymakers surprise with a larger hike; risk assets sell off and volatility jumps."},
+    {"category": "rate_decision", "sentiment": 1, "impact": 0.045,
+     "headline": "Surprise rate cut lifts sentiment",
+     "detail": "An unexpected cut sparks a relief rally — watch for a fade once the initial spike passes."},
+    {"category": "earnings", "sentiment": 1, "impact": 0.06,
+     "headline": "Northwind Industries beats earnings expectations",
+     "detail": "Results top forecasts; the gap-up can whipsaw as early buyers take profit."},
+    {"category": "earnings", "sentiment": -1, "impact": 0.065,
+     "headline": "Meridian Corp misses and cuts guidance",
+     "detail": "A miss plus weak guidance; spreads widen and the drop can overshoot."},
+    {"category": "scandal", "sentiment": -1, "impact": 0.08,
+     "headline": "Regulator opens accounting probe into Vantel Group",
+     "detail": "Headline risk in its purest form — sharp, disorderly moves and blown-out spreads."},
+    {"category": "hype", "sentiment": 1, "impact": 0.05,
+     "headline": "Sector goes viral as retail piles in",
+     "detail": "A hype wave on thin conviction; moves are fast and reversals are faster."},
+    {"category": "recession", "sentiment": -1, "impact": 0.05,
+     "headline": "GDP contracts, recession fears mount",
+     "detail": "Macro fear broadens the sell-off; trends can persist but with violent counter-rallies."},
+]
+
+
+def build_news_scenario(seed, n_bars=140, regime=None):
+    """Build a 'Scenario Mode' series with 3–5 scripted news events baked into
+    the price. Returns (bars, events) where each event carries its headline
+    metadata AND the bar it breaks on, and the bars already contain the
+    reaction. Deterministic for a given seed."""
+    rng = random.Random(seed)
+    base_regime = regime or rng.choice(["trend_up", "range", "trend_down", "high_vol"])
+
+    n_events = rng.randint(3, 5)
+    # space events out, keeping clear of the very start/end
+    lo, hi = int(n_bars * 0.15), int(n_bars * 0.9)
+    bars_for_events = sorted(rng.sample(range(lo, hi), n_events))
+
+    events = []
+    for bar in bars_for_events:
+        tpl = rng.choice(NEWS_TEMPLATES)
+        events.append({
+            "bar": bar,
+            "category": tpl["category"],
+            "headline": tpl["headline"],
+            "detail": tpl["detail"],
+            "sentiment": tpl["sentiment"],
+            "impact": round(tpl["impact"] * (0.8 + 0.4 * rng.random()), 4),
+        })
+
+    bars = generate_series(regime=base_regime, n_bars=n_bars, seed=seed, events=events)
+    return bars, events
