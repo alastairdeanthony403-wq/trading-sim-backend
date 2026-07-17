@@ -299,6 +299,55 @@ def get_events(session_id):
     ])
 
 
+@bp.route("/sessions/<int:session_id>/scam-debrief", methods=["GET"])
+def scam_debrief(session_id):
+    """Post-scenario debrief for scam (pump-and-dump) scenarios. Scores whether
+    the player took the bait — held a long across the rug — and returns the
+    recognise-a-scam checklist. Teaches recognition, not technique."""
+    from app.models.event import ScenarioEvent
+    from app.synthetic import SCAM_ANATOMY
+    session = Session.query.get_or_404(session_id)
+    scenario = Scenario.query.get(session.scenario_id)
+    tags = (scenario.tags or []) if scenario else []
+    if "scam" not in tags:
+        return jsonify({"is_scam": False})
+
+    rug = (ScenarioEvent.query
+           .filter_by(scenario_id=session.scenario_id, category="rug")
+           .order_by(ScenarioEvent.bar_sequence).first())
+    rug_bar = rug.bar_sequence if rug else None
+
+    took_bait = False
+    exited_before_rug = False
+    if rug_bar is not None:
+        for t in session.trades:
+            if t.direction != "long" or t.status == "pending":
+                continue
+            entered = t.bar_sequence_entered
+            exited = t.bar_sequence_exited if t.bar_sequence_exited is not None else 10 ** 9
+            if entered <= rug_bar <= exited:
+                took_bait = True          # long, open across the rug → caught
+            elif entered < rug_bar and exited < rug_bar:
+                exited_before_rug = True   # got in on the hype but out before the drop
+
+    longs = [t for t in session.trades if t.direction == "long" and t.status != "pending"]
+    if not longs:
+        verdict = "stayed_out"
+    elif took_bait:
+        verdict = "took_bait"
+    else:
+        verdict = "got_out"
+
+    return jsonify({
+        "is_scam": True,
+        "rug_bar": rug_bar,
+        "took_bait": took_bait,
+        "exited_before_rug": exited_before_rug,
+        "verdict": verdict,
+        "anatomy": SCAM_ANATOMY,
+    })
+
+
 # ---------- Trading ----------
 
 def _trade_dict(t):

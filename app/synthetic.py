@@ -209,3 +209,84 @@ def build_news_scenario(seed, n_bars=140, regime=None):
 
     bars = generate_series(regime=base_regime, n_bars=n_bars, seed=seed, events=events)
     return bars, events
+
+
+# ── Scam / pump-and-dump scenarios (Phase E step 3) ──────────────────────
+# Fictional promoter handles for the hype feed. The point of these scenarios is
+# to teach RECOGNITION of a pump-and-dump, never how to run one — the debrief
+# spells out the tells and the copy stays satirical of hype, not instructional.
+SHILL_HANDLES = ["@MoonBoyCapital", "@AlphaGuru", "@100xCaller",
+                 "@DiamondHandsDan", "@EarlyWhale"]
+SHILL_POSTS = [
+    "Accumulating quietly here 👀 you didn't hear it from me",
+    "This one is about to run — don't miss the boat 🚀",
+    "Still SO early. Generational wealth incoming.",
+    "Weak hands getting shaken out. We only go up from here.",
+    "If you're not in yet, what are you even doing? 💎🙌",
+    "Told you. Screenshot this. Next stop the moon.",
+]
+
+
+def build_scam_scenario(seed, n_bars=120, start_price=20.0):
+    """A pump-and-dump: a quiet base, an accelerating ramp on THIN volume while
+    promoters hype it, then a violent rug when liquidity vanishes. Returns
+    (bars, events) where events are the escalating hype posts plus a 'rug'
+    marker at the top. Deterministic for a given seed."""
+    rng = random.Random(seed)
+    pump_start = int(n_bars * 0.30)
+    rug_bar = int(n_bars * 0.66)
+    rug_len = max(4, int(n_bars * 0.08))
+
+    bars = []
+    price = float(start_price)
+    for i in range(n_bars):
+        if i < pump_start:
+            mu, sigma, volf = 0.0004, 0.010, 1.0         # quiet base, normal volume
+        elif i < rug_bar:
+            prog = (i - pump_start) / max(1, (rug_bar - pump_start))
+            mu, sigma, volf = 0.020 + 0.030 * prog, 0.022, 0.35   # ramp on THIN volume
+        elif i < rug_bar + rug_len:
+            mu, sigma, volf = -0.16, 0.05, 3.2           # the rug: crash on huge volume
+        else:
+            mu, sigma, volf = -0.004, 0.020, 0.5         # dead, drifting lower
+
+        z = rng.gauss(0, 1)
+        log_ret = mu + sigma * z
+        open_ = price
+        close = max(1e-4, open_ * math.exp(log_ret))
+        hi = max(open_, close) * math.exp(abs(rng.gauss(0, 1)) * sigma * 0.6)
+        lo = min(open_, close) * math.exp(-abs(rng.gauss(0, 1)) * sigma * 0.6)
+        lo = max(1e-4, min(lo, min(open_, close)))
+        hi = max(hi, max(open_, close))
+        volume = round(1000 * volf * (0.7 + 0.6 * rng.random()), 2)
+
+        bars.append({"open": round(open_, 4), "high": round(hi, 4),
+                     "low": round(lo, 4), "close": round(close, 4), "volume": volume})
+        price = close
+
+    # Escalating hype through the pump, then the rug alert at the top.
+    events = []
+    n_posts = min(len(SHILL_POSTS), 5)
+    for k in range(n_posts):
+        bar = pump_start + int((rug_bar - pump_start) * (k + 1) / (n_posts + 1))
+        events.append({
+            "bar": bar, "category": "hype", "sentiment": 1, "impact": 0.0,
+            "headline": SHILL_POSTS[k],
+            "detail": rng.choice(SHILL_HANDLES),
+        })
+    events.append({
+        "bar": rug_bar, "category": "rug", "sentiment": -1, "impact": 0.0,
+        "headline": "Liquidity pulled — the price collapses",
+        "detail": "The promoters went quiet at the top. This is the rug.",
+    })
+    return bars, events
+
+
+# Recognise-a-scam checklist used in the post-scenario debrief.
+SCAM_ANATOMY = [
+    "The ramp came on THIN volume — few real buyers, easy to push.",
+    "Anonymous promoters posted escalating urgency: 'don't miss out', 'so early'.",
+    "Promises of fast, guaranteed, life-changing gains — and no fundamentals.",
+    "The loudest voices went silent right at the top.",
+    "When liquidity vanished, the exit was a cliff, not a slope.",
+]

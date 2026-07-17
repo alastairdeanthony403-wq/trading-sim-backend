@@ -164,6 +164,59 @@ def generate_news_scenarios():
     return jsonify({"status": "ok", "results": created})
 
 
+@bp.route("/setup/generate-scam-scenarios", methods=["POST"])
+def generate_scam_scenarios():
+    """Mint pump-and-dump scenarios with an escalating hype feed and a rug
+    (Phase E step 3). Body (all optional):
+        {"count": 2, "n_bars": 120, "asset_class": "crypto", "seed": 77}
+    """
+    if not _authorized():
+        return jsonify({"error": "unauthorized"}), 401
+
+    from app.models.scenario import Scenario, ScenarioBar
+    from app.models.event import ScenarioEvent
+    from app.synthetic import build_scam_scenario
+
+    body = request.get_json(silent=True) or {}
+    count = int(body.get("count", 2))
+    n_bars = int(body.get("n_bars", 120))
+    asset_class = body.get("asset_class", "crypto")
+    base_seed = body.get("seed")
+    base = int(base_seed) if base_seed is not None else random.randint(1, 10 ** 9)
+
+    created = []
+    for k in range(count):
+        seed = base + k
+        bars, events = build_scam_scenario(seed=seed, n_bars=n_bars)
+        scenario = Scenario(
+            name_internal=f"scam_{seed}",
+            asset_class=asset_class,
+            timeframe="1D",
+            difficulty_tier=3,
+            tags=["synthetic", "scam", "scenario_mode"],
+            is_active=True,
+        )
+        db.session.add(scenario)
+        db.session.flush()
+        for i, b in enumerate(bars):
+            db.session.add(ScenarioBar(
+                scenario_id=scenario.id, bar_sequence=i,
+                open=b["open"], high=b["high"], low=b["low"],
+                close=b["close"], volume=b["volume"],
+            ))
+        for e in events:
+            db.session.add(ScenarioEvent(
+                scenario_id=scenario.id, bar_sequence=e["bar"],
+                category=e["category"], headline=e["headline"],
+                detail=e["detail"], sentiment=e["sentiment"], impact=e["impact"],
+            ))
+        db.session.commit()
+        created.append({"scenario_id": scenario.id, "bars": len(bars),
+                        "events": len(events), "status": "created"})
+
+    return jsonify({"status": "ok", "results": created})
+
+
 @bp.route("/setup/migrate-completed-lessons", methods=["POST"])
 def migrate_completed_lessons():
     provided_key = request.headers.get("X-Setup-Key")
