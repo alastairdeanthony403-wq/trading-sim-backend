@@ -199,12 +199,22 @@ def list_scenarios():
     # scenario with whether that user's career level has unlocked its market.
     user_id = request.args.get("user_id")
     unlocked_markets = None
+    gated_markets = None
     if user_id:
         from app.routes.progress import (get_or_create_progress, _tool_level,
-                                          _unlocked_markets)
+                                          _unlocked_markets, MARKET_UNLOCKS)
         progress = get_or_create_progress(user_id)
         _tools, level = _tool_level(progress)
         unlocked_markets = set(_unlocked_markets(level))
+        gated_markets = set(MARKET_UNLOCKS)
+
+    def is_unlocked(asset_class):
+        # Only the known career-gated markets can be locked; synthetic and any
+        # ungated class is always available as practice ground.
+        if unlocked_markets is None or asset_class not in gated_markets:
+            return True
+        return asset_class in unlocked_markets
+
     return jsonify([
         {
             "id": s.id,
@@ -213,8 +223,7 @@ def list_scenarios():
             "difficulty_tier": s.difficulty_tier,
             "tags": s.tags,
             "bar_count": len(s.bars),
-            "market_unlocked": (unlocked_markets is None
-                                or s.asset_class in unlocked_markets),
+            "market_unlocked": is_unlocked(s.asset_class),
         }
         for s in scenarios
     ])

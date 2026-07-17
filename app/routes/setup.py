@@ -1,4 +1,5 @@
 import os
+import random
 from flask import Blueprint, jsonify, request
 from app import db
 
@@ -51,6 +52,63 @@ def db_upgrade():
         return jsonify({"status": "ok", "message": "migrated to head"})
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)}), 500
+
+
+@bp.route("/setup/generate-scenarios", methods=["POST"])
+def generate_scenarios():
+    """Mint synthetic regime-switching scenarios (Phase E). No external API, so
+    this is unlimited and safe to re-run. Body (all optional):
+        {"regimes": ["crash","range",...],  # defaults to all regimes
+         "per_regime": 2,                    # how many of each
+         "n_bars": 120,
+         "asset_class": "synthetic",
+         "seed": 12345}                       # base seed for reproducibility
+    """
+    if not _authorized():
+        return jsonify({"error": "unauthorized"}), 401
+
+    from app.models.scenario import Scenario, ScenarioBar
+    from app.synthetic import generate_series, make_scenario_spec, REGIMES
+
+    body = request.get_json(silent=True) or {}
+    regimes = body.get("regimes") or REGIMES
+    per_regime = int(body.get("per_regime", 2))
+    n_bars = int(body.get("n_bars", 120))
+    asset_class = body.get("asset_class", "synthetic")
+    base_seed = body.get("seed")
+    base = int(base_seed) if base_seed is not None else random.randint(1, 10 ** 9)
+
+    created = []
+    for regime in regimes:
+        if regime not in REGIMES:
+            created.append({"regime": regime, "status": "skipped", "detail": "unknown regime"})
+            continue
+        for k in range(per_regime):
+            seed = base + hash(regime) % 100000 + k
+            bars = generate_series(regime=regime, n_bars=n_bars, seed=seed)
+            spec = make_scenario_spec(regime, seed)
+            scenario = Scenario(
+                name_internal=spec["name_internal"],
+                asset_class=asset_class,
+                timeframe="1D",
+                difficulty_tier=spec["difficulty_tier"],
+                tags=spec["tags"],
+                is_active=True,
+            )
+            db.session.add(scenario)
+            db.session.flush()
+            for i, b in enumerate(bars):
+                db.session.add(ScenarioBar(
+                    scenario_id=scenario.id, bar_sequence=i,
+                    open=b["open"], high=b["high"], low=b["low"],
+                    close=b["close"], volume=b["volume"],
+                ))
+            db.session.commit()
+            created.append({"regime": regime, "scenario_id": scenario.id,
+                            "bars": len(bars), "tier": spec["difficulty_tier"],
+                            "status": "created"})
+
+    return jsonify({"status": "ok", "results": created})
 
 
 @bp.route("/setup/migrate-completed-lessons", methods=["POST"])
