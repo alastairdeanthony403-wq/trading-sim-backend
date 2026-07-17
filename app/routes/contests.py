@@ -5,12 +5,14 @@ the shared composite+discipline system, one scored attempt per user, leaderboard
 resets each week. Contest sessions are anti-cheat: bars are revealed one at a
 time server-side (see game.advance / game.get_bars).
 """
+import random
+import string
 from datetime import date, datetime, timezone, timedelta
 from flask import Blueprint, jsonify, request
 from app import db
 from app.models.scenario import Scenario, ScenarioBar
 from app.models.session import Session
-from app.models.competition import Contest, ContestEntry
+from app.models.competition import Contest, ContestEntry, League, LeagueMember
 from app.synthetic import generate_series, REGIMES
 from app.routes.game import _finalize_session
 
@@ -164,3 +166,90 @@ def contest_leaderboard(contest_id):
                .order_by(ContestEntry.composite_score.desc().nullslast())
                .limit(50).all())
     return jsonify([_entry_view(e, i + 1) for i, e in enumerate(entries)])
+
+
+# ── Private leagues (Phase G step 2) ──────────────────────────────────────
+
+def _new_invite_code():
+    alphabet = string.ascii_uppercase + string.digits
+    for _ in range(20):
+        code = "".join(random.choice(alphabet) for _ in range(6))
+        if not League.query.filter_by(invite_code=code).first():
+            return code
+    # extremely unlikely fallback
+    return "".join(random.choice(alphabet) for _ in range(8))
+
+
+def _league_view(league):
+    return {"league_id": league.id, "name": league.name,
+            "invite_code": league.invite_code, "owner_user_id": league.owner_user_id,
+            "member_count": LeagueMember.query.filter_by(league_id=league.id).count()}
+
+
+@bp.route("/leagues", methods=["POST"])
+def create_league():
+    body = request.get_json(force=True) or {}
+    name = (body.get("name") or "").strip()
+    user_id = body.get("user_id", "anonymous")
+    display_name = (body.get("display_name") or "").strip()
+    if not name or not display_name:
+        return jsonify({"error": "A league name and your display name are required."}), 400
+
+    league = League(name=name[:80], invite_code=_new_invite_code(), owner_user_id=user_id)
+    db.session.add(league)
+    db.session.flush()
+    db.session.add(LeagueMember(league_id=league.id, user_id=user_id,
+                                display_name=display_name[:60]))
+    db.session.commit()
+    return jsonify(_league_view(league))
+
+
+@bp.route("/leagues/join", methods=["POST"])
+def join_league():
+    body = request.get_json(force=True) or {}
+    code = (body.get("invite_code") or "").strip().upper()
+    user_id = body.get("user_id", "anonymous")
+    display_name = (body.get("display_name") or "").strip()
+    if not display_name:
+        return jsonify({"error": "A display name is required to join."}), 400
+
+    league = League.query.filter_by(invite_code=code).first()
+    if not league:
+        return jsonify({"error": "No league found for that invite code."}), 404
+
+    member = LeagueMember.query.filter_by(league_id=league.id, user_id=user_id).first()
+    if not member:
+        db.session.add(LeagueMember(league_id=league.id, user_id=user_id,
+                                    display_name=display_name[:60]))
+        db.session.commit()
+    return jsonify(_league_view(league))
+
+
+@bp.route("/leagues/mine", methods=["GET"])
+def my_leagues():
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return jsonify([])
+    memberships = LeagueMember.query.filter_by(user_id=user_id).all()
+    leagues = [League.query.get(m.league_id) for m in memberships]
+    return jsonify([_league_view(l) for l in leagues if l])
+
+
+@bp.route("/leagues/<int:league_id>/leaderboard", methods=["GET"])
+def league_leaderboard(league_id):
+    """Aggregate each member's weekly contest results into a season table."""
+    League.query.get_or_404(league_id)
+    members = LeagueMember.query.filter_by(league_id=league_id).all()
+    rows = []
+    for m in members:
+        entries = ContestEntry.query.filter_by(user_id=m.user_id).all()
+        played = len(entries)
+        total = sum((e.composite_score or 0.0) for e in entries)
+        best = max((e.composite_score or 0.0) for e in entries) if entries else 0.0
+        rows.append({"user_id": m.user_id, "display_name": m.display_name,
+                     "contests_played": played, "total_score": round(total, 2),
+                     "best_score": round(best, 2)})
+    rows.sort(key=lambda r: r["total_score"], reverse=True)
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    return jsonify(rows)
