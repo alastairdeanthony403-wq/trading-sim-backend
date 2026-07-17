@@ -144,6 +144,26 @@ def build_findings(session, discipline, replay):
         add("info", f"{n} trades in one session is a lot — costs and marginal setups add up. "
             "Fewer, higher-conviction trades usually beat churn.", "trading_plan")
 
+    # 7) psychology read (Phase E) — name the impulse that showed up and tie it
+    # back to the in-session character voices (the hype/aggressive pull).
+    from app.characters import IMPULSE_VOICE
+    impulses = []
+    if discipline["revenge_count"]:
+        impulses.append("revenge")
+    if discipline["oversize_count"]:
+        impulses.append("fomo")
+    if winners and planned:
+        avg_win_r = sum(t["achieved_r"] for t in winners) / len(winners)
+        avg_planned = sum(planned) / len(planned)
+        if avg_planned > 0 and avg_win_r < 0.5 * avg_planned:
+            impulses.append("fear")
+    if impulses:
+        labels = ", ".join(IMPULSE_VOICE[i][0] for i in impulses)
+        who = IMPULSE_VOICE[impulses[0]][1]
+        add("warn", f"Psychology read: signs of {labels}. That's the voice of {who} "
+            "winning the moment. The fix isn't willpower — it's a written plan you follow "
+            "when the loud voice shows up.", "psychology_discipline")
+
     # positive reinforcement when the process was sound
     if not findings and discipline["discipline_score"] >= 90:
         add("good", "Clean, disciplined session — defined risk, sensible size, no revenge. "
