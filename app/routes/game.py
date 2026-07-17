@@ -283,6 +283,7 @@ def get_events(session_id):
     client reveals each one as playback reaches its bar (the price reaction is
     already baked into the bars, so it stays server-authoritative)."""
     from app.models.event import ScenarioEvent
+    from app.characters import voices_for_event
     session = Session.query.get_or_404(session_id)
     events = (ScenarioEvent.query
               .filter_by(scenario_id=session.scenario_id)
@@ -294,6 +295,8 @@ def get_events(session_id):
             "headline": e.headline,
             "detail": e.detail,
             "sentiment": e.sentiment,
+            # conflicting character takes surfaced at the moment the headline breaks
+            "voices": voices_for_event(e.category, e.sentiment),
         }
         for e in events
     ])
@@ -575,6 +578,17 @@ def advance(session_id):
         maint = _maintenance_margin(opens)
         margin_call = maint < equity_now <= maint * MARGIN_CALL_MULT
 
+    # Character voices at a decision point: a losing stop-out (revenge tempation)
+    # or holding with no stop. Flavour that dramatises the emotional pull.
+    from app.characters import voices_for_context
+    voices = []
+    lost = any(e.get("event") in ("closed", "liquidated") and (e.get("pnl") or 0) < 0
+               for e in events)
+    if lost:
+        voices = voices_for_context("after_stopout")
+    elif any(t.stop_loss is None for t in opens):
+        voices = voices_for_context("no_stop")
+
     db.session.commit()
     return jsonify({
         "events": events,
@@ -582,6 +596,7 @@ def advance(session_id):
         "blown": session.status == "blown",
         "margin_call": margin_call,
         "concentrated": _is_concentrated(opens),
+        "voices": voices,
         "status": session.status,
     })
 
