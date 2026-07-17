@@ -15,6 +15,12 @@ class Session(db.Model):
     # "standard" | "fund_manager" (client-money rules: 1% risk cap, 8% max DD)
     mode = db.Column(db.String(20), nullable=False, default="standard", server_default="standard")
 
+    # ── Contest anti-cheat (Phase G) ──────────────────────────────────────
+    # Contest sessions never receive future bars up front: the server reveals
+    # bars one at a time (bars_served is the high-water bar index revealed).
+    is_contest = db.Column(db.Boolean, nullable=False, default=False, server_default="false")
+    bars_served = db.Column(db.Integer, nullable=True)
+
     trades = db.relationship("Trade", backref="session", lazy=True, cascade="all, delete-orphan")
     score = db.relationship("SessionScore", backref="session", uselist=False, cascade="all, delete-orphan")
 
