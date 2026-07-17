@@ -259,6 +259,14 @@ def get_bars(session_id):
     session = Session.query.get_or_404(session_id)
     up_to = request.args.get("up_to", type=int)
 
+    # Contest anti-cheat: never serve bars beyond the server-tracked high-water
+    # (bars_served), no matter what up_to the client asks for. This is what
+    # stops a contestant from grabbing the whole future and computing perfect
+    # trades — future bars simply do not exist to them yet.
+    if session.is_contest:
+        cap = session.bars_served if session.bars_served is not None else 0
+        up_to = cap if up_to is None else min(up_to, cap)
+
     query = ScenarioBar.query.filter_by(scenario_id=session.scenario_id).order_by(ScenarioBar.bar_sequence)
     if up_to is not None:
         query = query.filter(ScenarioBar.bar_sequence <= up_to)
@@ -496,6 +504,16 @@ def advance(session_id):
     up_to = int((request.get_json(force=True) or {}).get("bar_sequence"))
     slip_pct = _cost_model(session)["slippage_pct"]
 
+    # Contest sessions: the SERVER is the clock. Each advance reveals exactly one
+    # new bar (ignoring whatever bar the client asked for), so a contestant can
+    # never race ahead to see the future.
+    if session.is_contest:
+        total = ScenarioBar.query.filter_by(scenario_id=session.scenario_id).count()
+        served = session.bars_served if session.bars_served is not None else 0
+        served = min(total - 1, served + 1)
+        session.bars_served = served
+        up_to = served
+
     bars = (ScenarioBar.query
             .filter_by(scenario_id=session.scenario_id)
             .filter(ScenarioBar.bar_sequence <= up_to)
@@ -597,6 +615,7 @@ def advance(session_id):
         "margin_call": margin_call,
         "concentrated": _is_concentrated(opens),
         "voices": voices,
+        "bars_served": session.bars_served,
         "status": session.status,
     })
 
@@ -643,6 +662,29 @@ def session_coach_llm(session_id):
 @bp.route("/sessions/<int:session_id>/end", methods=["POST"])
 def end_session(session_id):
     session = Session.query.get_or_404(session_id)
+    return jsonify(_finalize_session(session))
+
+
+def _finalize_session(session):
+    """Score + persist a finished session (idempotent: re-calling returns the
+    stored result instead of double-scoring). Shared by /end and contest submit."""
+    if session.score is not None:
+        sc = session.score
+        disc = evaluate_discipline(session)
+        return {
+            "session_id": session.id,
+            "ending_balance": session.ending_balance,
+            "total_return_pct": sc.total_return_pct,
+            "sharpe_ratio": sc.sharpe_ratio,
+            "max_drawdown_pct": sc.max_drawdown_pct,
+            "win_rate": sc.win_rate,
+            "avg_r_multiple": sc.avg_r_multiple,
+            "score_composite": sc.score_composite,
+            "discipline": disc,
+            "blown": session.status == "blown",
+            "post_mortem": _post_mortem(session),
+        }
+
     trades = [t for t in session.trades if t.pnl is not None]
 
     total_pnl = sum(t.pnl for t in trades)
@@ -738,7 +780,7 @@ def end_session(session_id):
     ))
     db.session.commit()
 
-    return jsonify({
+    return {
         "session_id": session.id,
         "ending_balance": ending_balance,
         "total_return_pct": total_return_pct,
@@ -751,7 +793,7 @@ def end_session(session_id):
         "blown": blown,
         "post_mortem": _post_mortem(session),
         "newly_unlocked_tiers": progress.unlocked_scenario_tiers,
-    })
+    }
 
 
 def _post_mortem(session):
