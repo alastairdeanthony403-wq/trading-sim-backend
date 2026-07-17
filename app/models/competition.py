@@ -28,3 +28,26 @@ class ContestEntry(db.Model):
     composite_score = db.Column(db.Float, nullable=True)
     discipline_score = db.Column(db.Float, nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class League(db.Model):
+    """A private league: friends join by invite code; the league leaderboard
+    aggregates their weekly contest results."""
+    __tablename__ = "leagues"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(80), nullable=False)
+    invite_code = db.Column(db.String(12), nullable=False, unique=True)
+    owner_user_id = db.Column(db.String(120), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class LeagueMember(db.Model):
+    __tablename__ = "league_members"
+    __table_args__ = (db.UniqueConstraint("league_id", "user_id", name="uq_league_user"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    league_id = db.Column(db.Integer, db.ForeignKey("leagues.id"), nullable=False)
+    user_id = db.Column(db.String(120), nullable=False)
+    display_name = db.Column(db.String(60), nullable=False)
+    joined_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
