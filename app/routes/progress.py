@@ -39,6 +39,12 @@ CURRICULUM = [
         "lessons": ["trade_journaling", "trading_plan", "psychology_discipline"],
         "check": "check_discipline",
     },
+    {
+        "unit": 6,
+        "title": "Fundamentals & leverage",
+        "lessons": ["fundamentals_companies", "earnings_reports", "leverage_margin"],
+        "check": "check_fundamentals",
+    },
 ]
 
 # Flattened ordered list of all learning-path items (lessons + checks interleaved)
