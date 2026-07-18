@@ -34,4 +34,11 @@ def create_app():
     app.register_blueprint(missions.bp)
     app.register_blueprint(contests.bp)
 
+    # Self-heal: make the DB schema match the models on boot (creates missing
+    # tables, adds missing columns) so a deploy can't leave endpoints 500ing on
+    # a stale schema. Idempotent and safe to run on every worker.
+    if os.environ.get("SCHEMA_SYNC", "on") != "off":
+        from app.schema_sync import reconcile_schema
+        reconcile_schema(app)
+
     return app
