@@ -10,6 +10,9 @@ class Scenario(db.Model):
     difficulty_tier = db.Column(db.Integer, nullable=False, default=1)
     tags = db.Column(db.ARRAY(db.String), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
+    # Rule 0: leading bars shown as pre-playback history on chart load (playback
+    # then reveals the rest one at a time). NULL → legacy small window.
+    history_bars = db.Column(db.Integer, nullable=True)
 
     bars = db.relationship("ScenarioBar", backref="scenario", lazy=True, cascade="all, delete-orphan")
 

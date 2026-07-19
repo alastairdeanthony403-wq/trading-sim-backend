@@ -18,8 +18,8 @@ from app.routes.game import _finalize_session
 
 bp = Blueprint("contests", __name__)
 
-CONTEST_INITIAL_BARS = 20   # warm-up bars visible at the start
-CONTEST_BARS = 140
+CONTEST_HISTORY = 300       # Rule 0: pre-playback history shown at start
+CONTEST_BARS = 460          # 300 history + 160 to trade through
 
 
 def _week_start(d=None):
@@ -39,7 +39,8 @@ def _ensure_current_contest():
     bars = generate_series(regime=regime, n_bars=CONTEST_BARS, seed=seed)
     sc = Scenario(name_internal=f"contest_{ws.isoformat()}", asset_class="synthetic",
                   timeframe="1D", difficulty_tier=2,
-                  tags=["contest", "synthetic", regime], is_active=True)
+                  tags=["contest", "synthetic", regime], is_active=True,
+                  history_bars=CONTEST_HISTORY)
     db.session.add(sc)
     db.session.flush()
     for i, b in enumerate(bars):
@@ -89,10 +90,12 @@ def start_contest_session():
     body = request.get_json(silent=True) or {}
     user_id = body.get("user_id", "anonymous")
 
+    from app.routes.game import initial_window
+    scenario = Scenario.query.get(c.scenario_id)
     session = Session(user_id=user_id, scenario_id=c.scenario_id,
                       starting_balance=body.get("starting_balance", 10000.0),
                       status="in_progress", is_contest=True,
-                      bars_served=min(CONTEST_INITIAL_BARS, CONTEST_BARS - 1))
+                      bars_served=initial_window(scenario))
     db.session.add(session)
     db.session.commit()
 

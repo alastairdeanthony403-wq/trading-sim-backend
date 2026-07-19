@@ -73,7 +73,10 @@ def generate_scenarios():
     body = request.get_json(silent=True) or {}
     regimes = body.get("regimes") or REGIMES
     per_regime = int(body.get("per_regime", 2))
-    n_bars = int(body.get("n_bars", 120))
+    # Rule 0: ≥300 bars of pre-playback history, then bars to trade through.
+    history_bars = int(body.get("history_bars", 300))
+    playback_bars = int(body.get("playback_bars", 160))
+    n_bars = history_bars + playback_bars
     asset_class = body.get("asset_class", "synthetic")
     base_seed = body.get("seed")
     base = int(base_seed) if base_seed is not None else random.randint(1, 10 ** 9)
@@ -94,6 +97,7 @@ def generate_scenarios():
                 difficulty_tier=spec["difficulty_tier"],
                 tags=spec["tags"],
                 is_active=True,
+                history_bars=history_bars,
             )
             db.session.add(scenario)
             db.session.flush()
@@ -105,8 +109,8 @@ def generate_scenarios():
                 ))
             db.session.commit()
             created.append({"regime": regime, "scenario_id": scenario.id,
-                            "bars": len(bars), "tier": spec["difficulty_tier"],
-                            "status": "created"})
+                            "bars": len(bars), "history_bars": history_bars,
+                            "tier": spec["difficulty_tier"], "status": "created"})
 
     return jsonify({"status": "ok", "results": created})
 
