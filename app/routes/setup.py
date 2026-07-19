@@ -111,6 +111,82 @@ def generate_scenarios():
     return jsonify({"status": "ok", "results": created})
 
 
+@bp.route("/setup/generate-intraday-scenarios", methods=["POST"])
+def generate_intraday_scenarios():
+    """Mint multi-timeframe INTRADAY scenarios (Phase 2). The stored series is
+    1-minute bars; the chart can switch between 1m/5m/15m/30m/1h/4h (aggregated
+    on read). Seed-only — no bars persisted. Body (all optional):
+        {"regimes": ["trend_up","range","high_vol"],  # one scenario per regime*per_regime
+         "per_regime": 1,
+         "days": 7,                 # ~trading days of 1-minute data
+         "bars_per_day": 390,       # minutes per session (390 ≈ a US equity day)
+         "anchor_tf": "15m",        # timeframe the chart opens on
+         "history_candles": 80,     # Rule-0 pre-playback history, in anchor_tf candles
+         "asset_class": "synthetic",
+         "seed": 12345}
+    """
+    if not _authorized():
+        return jsonify({"error": "unauthorized"}), 401
+
+    from app.models.scenario import Scenario
+    from app.synthetic import make_scenario_spec, REGIMES
+    from app.engine import CURRENT_ENGINE
+    from app.bar_provider import TF_MINUTES
+
+    body = request.get_json(silent=True) or {}
+    regimes = body.get("regimes") or ["trend_up", "range", "high_vol"]
+    per_regime = int(body.get("per_regime", 1))
+    days = int(body.get("days", 7))
+    bars_per_day = int(body.get("bars_per_day", 390))
+    anchor_tf = body.get("anchor_tf", "15m")
+    anchor_mult = TF_MINUTES.get(anchor_tf, 15)
+    asset_class = body.get("asset_class", "synthetic")
+    available = ["1m", "5m", "15m", "30m", "1h", "4h"]
+
+    n_bars = days * bars_per_day
+    # Rule 0 anchored on the anchor timeframe: history_candles anchor-TF candles,
+    # expressed in BASE (1m) units and kept an exact multiple so the first anchor
+    # candle is complete. Clamp to leave room for playback.
+    history_candles = int(body.get("history_candles", 80))
+    history_bars = min(history_candles * anchor_mult, n_bars - anchor_mult)
+    history_bars = max(anchor_mult, history_bars)
+
+    base_seed = body.get("seed")
+    base = int(base_seed) if base_seed is not None else random.randint(1, 10 ** 9)
+
+    created = []
+    for regime in regimes:
+        if regime not in REGIMES:
+            created.append({"regime": regime, "status": "skipped", "detail": "unknown regime"})
+            continue
+        for k in range(per_regime):
+            seed = base + hash(regime) % 100000 + k
+            spec = make_scenario_spec(regime, seed)
+            scenario = Scenario(
+                name_internal=f"intraday_{regime}_{seed}",
+                asset_class=asset_class,
+                timeframe=anchor_tf,                 # display/label unit
+                base_timeframe="1m",
+                available_timeframes=available,
+                difficulty_tier=spec["difficulty_tier"],
+                tags=["synthetic", "intraday", regime],
+                is_active=True,
+                history_bars=history_bars,
+                engine_version=CURRENT_ENGINE, seed=seed,
+                gen_params={"kind": "intraday", "n_bars": n_bars, "regime": regime,
+                            "days": days, "bars_per_day": bars_per_day,
+                            "vol_scale": 0.15, "anchor_tf": anchor_tf},
+            )
+            db.session.add(scenario)
+            db.session.commit()
+            created.append({"regime": regime, "scenario_id": scenario.id,
+                            "bars_1m": n_bars, "history_bars": history_bars,
+                            "anchor_tf": anchor_tf, "timeframes": available,
+                            "tier": spec["difficulty_tier"], "status": "created"})
+
+    return jsonify({"status": "ok", "results": created})
+
+
 @bp.route("/setup/generate-news-scenarios", methods=["POST"])
 def generate_news_scenarios():
     """Mint 'Scenario Mode' scenarios with scripted news events baked into the

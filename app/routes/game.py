@@ -224,6 +224,8 @@ def list_scenarios():
             "tags": s.tags,
             "bar_count": bar_provider.count(s),
             "market_unlocked": is_unlocked(s.asset_class),
+            "available_timeframes": bar_provider.available_timeframes(s),
+            "base_timeframe": bar_provider.base_timeframe(s),
         }
         for s in scenarios
     ])
@@ -252,7 +254,12 @@ def start_session(scenario_id):
 
     return jsonify({"session_id": session.id, "scenario_id": scenario.id,
                     "starting_balance": starting_balance, "mode": mode,
-                    "history_bars": initial_window(scenario)})
+                    "history_bars": initial_window(scenario),
+                    # Multi-timeframe view metadata (single-TF scenarios: one entry).
+                    "base_timeframe": bar_provider.base_timeframe(scenario),
+                    "available_timeframes": bar_provider.available_timeframes(scenario),
+                    "anchor_tf": (scenario.gen_params or {}).get("anchor_tf")
+                    if scenario.gen_params else None})
 
 
 def initial_window(scenario):
@@ -279,6 +286,14 @@ def get_bars(session_id):
         up_to = cap if up_to is None else min(up_to, cap)
 
     scenario = Scenario.query.get_or_404(session.scenario_id)
+
+    # Multi-timeframe: ?tf=15m returns candles aggregated from the 1m base up to
+    # the same reveal point (up_to is in BASE units, so the contest cap above and
+    # the no-future-leak guarantee both still hold on every timeframe).
+    tf = request.args.get("tf")
+    if tf and tf in bar_provider.available_timeframes(scenario):
+        return jsonify(bar_provider.series_tf(scenario, tf, up_to))
+
     bars = bar_provider.upto(scenario, up_to)
     return jsonify([
         {
