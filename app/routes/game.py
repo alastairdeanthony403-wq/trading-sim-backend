@@ -251,7 +251,18 @@ def start_session(scenario_id):
     db.session.commit()
 
     return jsonify({"session_id": session.id, "scenario_id": scenario.id,
-                    "starting_balance": starting_balance, "mode": mode})
+                    "starting_balance": starting_balance, "mode": mode,
+                    "history_bars": initial_window(scenario)})
+
+
+def initial_window(scenario):
+    """Rule 0: how many leading bars to show as pre-playback history on load.
+    Uses the scenario's history_bars (clamped to leave ≥1 bar for playback);
+    falls back to a small legacy window for scenarios without it (real-market,
+    pre-Rule-0 synthetic)."""
+    total = ScenarioBar.query.filter_by(scenario_id=scenario.id).count()
+    want = scenario.history_bars if scenario.history_bars else 30
+    return max(1, min(want, total - 1)) if total > 1 else total
 
 
 @bp.route("/sessions/<int:session_id>/bars", methods=["GET"])
