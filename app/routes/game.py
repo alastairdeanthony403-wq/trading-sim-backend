@@ -1,7 +1,7 @@
 import math
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request
-from app import db
+from app import db, bar_provider
 from app.models.scenario import Scenario, ScenarioBar
 from app.models.session import Session, Trade, SessionScore
 from app.models.progress import Leaderboard
@@ -222,7 +222,7 @@ def list_scenarios():
             "timeframe": s.timeframe,
             "difficulty_tier": s.difficulty_tier,
             "tags": s.tags,
-            "bar_count": len(s.bars),
+            "bar_count": bar_provider.count(s),
             "market_unlocked": is_unlocked(s.asset_class),
         }
         for s in scenarios
@@ -260,7 +260,7 @@ def initial_window(scenario):
     Uses the scenario's history_bars (clamped to leave ≥1 bar for playback);
     falls back to a small legacy window for scenarios without it (real-market,
     pre-Rule-0 synthetic)."""
-    total = ScenarioBar.query.filter_by(scenario_id=scenario.id).count()
+    total = bar_provider.count(scenario)
     want = scenario.history_bars if scenario.history_bars else 30
     return max(1, min(want, total - 1)) if total > 1 else total
 
@@ -278,11 +278,8 @@ def get_bars(session_id):
         cap = session.bars_served if session.bars_served is not None else 0
         up_to = cap if up_to is None else min(up_to, cap)
 
-    query = ScenarioBar.query.filter_by(scenario_id=session.scenario_id).order_by(ScenarioBar.bar_sequence)
-    if up_to is not None:
-        query = query.filter(ScenarioBar.bar_sequence <= up_to)
-
-    bars = query.all()
+    scenario = Scenario.query.get_or_404(session.scenario_id)
+    bars = bar_provider.upto(scenario, up_to)
     return jsonify([
         {
             "bar_sequence": b.bar_sequence,
@@ -408,7 +405,10 @@ def open_trade(session_id):
     trail_distance = body.get("trail_distance")
     leverage = max(1.0, min(float(body.get("leverage", 1.0) or 1.0), 125.0))
 
-    bar = ScenarioBar.query.filter_by(scenario_id=session.scenario_id, bar_sequence=entry_bar_sequence).first_or_404()
+    scenario = Scenario.query.get_or_404(session.scenario_id)
+    bar = bar_provider.at(scenario, entry_bar_sequence)
+    if bar is None:
+        return jsonify({"error": "bar not found"}), 404
     cm = _cost_model(session)
 
     if order_type == "market":
@@ -480,7 +480,10 @@ def close_trade(trade_id):
     if trade.status == "closed":
         return jsonify({"trade_id": trade.id, "exit_price": trade.exit_price, "pnl": trade.pnl})
 
-    bar = ScenarioBar.query.filter_by(scenario_id=trade.session.scenario_id, bar_sequence=exit_bar_sequence).first_or_404()
+    scenario = Scenario.query.get_or_404(trade.session.scenario_id)
+    bar = bar_provider.at(scenario, exit_bar_sequence)
+    if bar is None:
+        return jsonify({"error": "bar not found"}), 404
     _settle_trade(trade, exit_bar_sequence, bar.close, "manual", _cost_model(trade.session)["slippage_pct"])
     db.session.commit()
     return jsonify({"trade_id": trade.id, "exit_price": trade.exit_price, "pnl": trade.pnl})
@@ -512,6 +515,7 @@ def advance(session_id):
     Server-authoritative and idempotent: re-calling with the same (or a lower)
     bar re-derives the same fills, since closed/filled state is persisted."""
     session = Session.query.get_or_404(session_id)
+    scenario = Scenario.query.get_or_404(session.scenario_id)
     up_to = int((request.get_json(force=True) or {}).get("bar_sequence"))
     slip_pct = _cost_model(session)["slippage_pct"]
 
@@ -519,16 +523,13 @@ def advance(session_id):
     # new bar (ignoring whatever bar the client asked for), so a contestant can
     # never race ahead to see the future.
     if session.is_contest:
-        total = ScenarioBar.query.filter_by(scenario_id=session.scenario_id).count()
+        total = bar_provider.count(scenario)
         served = session.bars_served if session.bars_served is not None else 0
         served = min(total - 1, served + 1)
         session.bars_served = served
         up_to = served
 
-    bars = (ScenarioBar.query
-            .filter_by(scenario_id=session.scenario_id)
-            .filter(ScenarioBar.bar_sequence <= up_to)
-            .order_by(ScenarioBar.bar_sequence).all())
+    bars = bar_provider.upto(scenario, up_to)
     events = []
 
     def realised():

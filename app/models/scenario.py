@@ -14,7 +14,21 @@ class Scenario(db.Model):
     # then reveals the rest one at a time). NULL → legacy small window.
     history_bars = db.Column(db.Integer, nullable=True)
 
+    # ── Seed-only synthetic (Phase 2) ─────────────────────────────────────
+    # Generated scenarios persist NO bars — they store the seed + params and are
+    # regenerated deterministically on read. engine_version pins WHICH engine
+    # produced them, so future engine changes never alter existing scenarios'
+    # bars (critical for active contests). NULL engine_version → row-based
+    # scenario (real-market / legacy), bars live in scenario_bars.
+    engine_version = db.Column(db.String(20), nullable=True)
+    seed = db.Column(db.BigInteger, nullable=True)
+    gen_params = db.Column(db.JSON, nullable=True)   # {kind, n_bars, regime, ...}
+
     bars = db.relationship("ScenarioBar", backref="scenario", lazy=True, cascade="all, delete-orphan")
+
+    @property
+    def is_generated(self):
+        return self.engine_version is not None
 
 
 class ScenarioBar(db.Model):

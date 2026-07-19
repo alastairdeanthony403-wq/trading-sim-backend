@@ -67,8 +67,9 @@ def generate_scenarios():
     if not _authorized():
         return jsonify({"error": "unauthorized"}), 401
 
-    from app.models.scenario import Scenario, ScenarioBar
-    from app.synthetic import generate_series, make_scenario_spec, REGIMES
+    from app.models.scenario import Scenario
+    from app.synthetic import make_scenario_spec, REGIMES
+    from app.engine import CURRENT_ENGINE
 
     body = request.get_json(silent=True) or {}
     regimes = body.get("regimes") or REGIMES
@@ -88,8 +89,8 @@ def generate_scenarios():
             continue
         for k in range(per_regime):
             seed = base + hash(regime) % 100000 + k
-            bars = generate_series(regime=regime, n_bars=n_bars, seed=seed)
             spec = make_scenario_spec(regime, seed)
+            # Seed-only: no bars persisted — stored seed + version regenerate them.
             scenario = Scenario(
                 name_internal=spec["name_internal"],
                 asset_class=asset_class,
@@ -98,18 +99,13 @@ def generate_scenarios():
                 tags=spec["tags"],
                 is_active=True,
                 history_bars=history_bars,
+                engine_version=CURRENT_ENGINE, seed=seed,
+                gen_params={"kind": "regime", "n_bars": n_bars, "regime": regime},
             )
             db.session.add(scenario)
-            db.session.flush()
-            for i, b in enumerate(bars):
-                db.session.add(ScenarioBar(
-                    scenario_id=scenario.id, bar_sequence=i,
-                    open=b["open"], high=b["high"], low=b["low"],
-                    close=b["close"], volume=b["volume"],
-                ))
             db.session.commit()
             created.append({"regime": regime, "scenario_id": scenario.id,
-                            "bars": len(bars), "history_bars": history_bars,
+                            "bars": n_bars, "history_bars": history_bars,
                             "tier": spec["difficulty_tier"], "status": "created"})
 
     return jsonify({"status": "ok", "results": created})
@@ -124,9 +120,10 @@ def generate_news_scenarios():
     if not _authorized():
         return jsonify({"error": "unauthorized"}), 401
 
-    from app.models.scenario import Scenario, ScenarioBar
+    from app.models.scenario import Scenario
     from app.models.event import ScenarioEvent
     from app.synthetic import build_news_scenario
+    from app.engine import CURRENT_ENGINE
 
     body = request.get_json(silent=True) or {}
     count = int(body.get("count", 3))
@@ -138,7 +135,9 @@ def generate_news_scenarios():
     created = []
     for k in range(count):
         seed = base + k
-        bars, events = build_news_scenario(seed=seed, n_bars=n_bars)
+        # Events are deterministic from the seed; bars regenerate identically on
+        # read, so persist the events (for headlines) but no bars.
+        _bars, events = build_news_scenario(seed=seed, n_bars=n_bars)
         scenario = Scenario(
             name_internal=f"scenario_mode_{seed}",
             asset_class=asset_class,
@@ -146,15 +145,11 @@ def generate_news_scenarios():
             difficulty_tier=2,
             tags=["synthetic", "scenario_mode", "news"],
             is_active=True,
+            engine_version=CURRENT_ENGINE, seed=seed,
+            gen_params={"kind": "news", "n_bars": n_bars},
         )
         db.session.add(scenario)
         db.session.flush()
-        for i, b in enumerate(bars):
-            db.session.add(ScenarioBar(
-                scenario_id=scenario.id, bar_sequence=i,
-                open=b["open"], high=b["high"], low=b["low"],
-                close=b["close"], volume=b["volume"],
-            ))
         for e in events:
             db.session.add(ScenarioEvent(
                 scenario_id=scenario.id, bar_sequence=e["bar"],
@@ -162,7 +157,7 @@ def generate_news_scenarios():
                 detail=e["detail"], sentiment=e["sentiment"], impact=e["impact"],
             ))
         db.session.commit()
-        created.append({"scenario_id": scenario.id, "bars": len(bars),
+        created.append({"scenario_id": scenario.id, "bars": n_bars,
                         "events": len(events), "status": "created"})
 
     return jsonify({"status": "ok", "results": created})
@@ -177,9 +172,10 @@ def generate_scam_scenarios():
     if not _authorized():
         return jsonify({"error": "unauthorized"}), 401
 
-    from app.models.scenario import Scenario, ScenarioBar
+    from app.models.scenario import Scenario
     from app.models.event import ScenarioEvent
     from app.synthetic import build_scam_scenario
+    from app.engine import CURRENT_ENGINE
 
     body = request.get_json(silent=True) or {}
     count = int(body.get("count", 2))
@@ -191,7 +187,7 @@ def generate_scam_scenarios():
     created = []
     for k in range(count):
         seed = base + k
-        bars, events = build_scam_scenario(seed=seed, n_bars=n_bars)
+        _bars, events = build_scam_scenario(seed=seed, n_bars=n_bars)
         scenario = Scenario(
             name_internal=f"scam_{seed}",
             asset_class=asset_class,
@@ -199,15 +195,11 @@ def generate_scam_scenarios():
             difficulty_tier=3,
             tags=["synthetic", "scam", "scenario_mode"],
             is_active=True,
+            engine_version=CURRENT_ENGINE, seed=seed,
+            gen_params={"kind": "scam", "n_bars": n_bars},
         )
         db.session.add(scenario)
         db.session.flush()
-        for i, b in enumerate(bars):
-            db.session.add(ScenarioBar(
-                scenario_id=scenario.id, bar_sequence=i,
-                open=b["open"], high=b["high"], low=b["low"],
-                close=b["close"], volume=b["volume"],
-            ))
         for e in events:
             db.session.add(ScenarioEvent(
                 scenario_id=scenario.id, bar_sequence=e["bar"],
@@ -215,7 +207,7 @@ def generate_scam_scenarios():
                 detail=e["detail"], sentiment=e["sentiment"], impact=e["impact"],
             ))
         db.session.commit()
-        created.append({"scenario_id": scenario.id, "bars": len(bars),
+        created.append({"scenario_id": scenario.id, "bars": n_bars,
                         "events": len(events), "status": "created"})
 
     return jsonify({"status": "ok", "results": created})
