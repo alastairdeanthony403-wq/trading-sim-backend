@@ -1,144 +1,197 @@
-"""Synthetic market generator (Phase E step 1).
+"""Synthetic market engine v2 (Phase 1 — core realism).
 
-Produces regime-switching OHLCV series server-side so we can mint unlimited
-scenarios without hitting API limits and without players memorising real
-history. The model is a regime-switched geometric Brownian motion with
-volatility clustering and occasional jumps/gaps — simple, dependency-free
-(standard library only), and visually plausible.
+A dependency-free (standard-library only), fully-seeded generator that produces
+OHLCV series with *real* market properties rather than a plain random walk:
 
-Each scenario is built from a *phase plan*: an ordered list of regimes the
-market moves through (e.g. a "crash" scenario is a calm rally that rolls over
-into a sharp sell-off and choppy aftermath). Scenarios are tagged by their
-headline regime so missions can request "a crash scenario".
+  * Regime switching via a Markov chain over
+    {trend_up, trend_down, range, high_vol, low_vol} with persistent durations
+    and SMOOTH transitions (drift/vol are blended over several bars, no snaps).
+  * Volatility clustering via a GARCH(1,1) conditional variance, plus an explicit
+    ATR expansion/compression cycle layered on top so candle ranges visibly cycle.
+  * Fat-tailed returns via standardized Student-t innovations (excess kurtosis).
+  * A market-structure layer: memory of recent swing highs/lows that price
+    respects probabilistically, occasional liquidity sweeps (poke beyond a level
+    then reverse) and failed breakouts.
+  * A volume engine: spikes on breakouts, quiet in compression, correlated with
+    range.
+
+Candlestick shapes (dojis, pin bars, engulfing, inside/outside bars) are NOT
+scripted — they emerge from the body/wick model and are verified by occurrence
+tests. Determinism: same seed -> identical series (required for contests).
+
+Public API kept stable for the rest of the app: REGIMES, generate_series,
+make_scenario_spec, build_news_scenario, build_scam_scenario, SCAM_ANATOMY.
 """
 import math
 import random
 
-# Headline regimes a caller can ask for.
-REGIMES = ["trend_up", "trend_down", "range", "high_vol", "crash", "bubble_pop"]
+# Markov regime set (Phase 1 adds low_vol).
+REGIMES = ["trend_up", "trend_down", "range", "high_vol", "low_vol"]
 
-# Per-bar drift (mu) and base volatility (sigma) in log-return terms.
-REGIME_PARAMS = {
-    "trend_up":   {"mu":  0.0011, "sigma": 0.009, "jump_p": 0.01, "jump": -0.03},
-    "trend_down": {"mu": -0.0012, "sigma": 0.012, "jump_p": 0.02, "jump": -0.04},
-    "range":      {"mu":  0.0000, "sigma": 0.007, "jump_p": 0.00, "jump":  0.00},
-    "high_vol":   {"mu":  0.0000, "sigma": 0.028, "jump_p": 0.04, "jump": -0.05},
-    "crash":      {"mu": -0.0060, "sigma": 0.024, "jump_p": 0.10, "jump": -0.09},
-    "bubble":     {"mu":  0.0075, "sigma": 0.016, "jump_p": 0.02, "jump":  0.06},
+# Per-regime per-bar drift (mu, in log-return terms) and volatility multiplier.
+REGIME_CFG = {
+    "trend_up":   {"mu":  0.00090, "vol": 1.00},
+    "trend_down": {"mu": -0.00110, "vol": 1.15},
+    "range":      {"mu":  0.00000, "vol": 0.80},
+    "high_vol":   {"mu":  0.00000, "vol": 2.30},
+    "low_vol":    {"mu":  0.00030, "vol": 0.45},
 }
 
-# Difficulty tier by headline regime (calmer = easier to trade well).
-REGIME_TIER = {
-    "range": 1, "trend_up": 1, "trend_down": 2,
-    "high_vol": 2, "bubble_pop": 2, "crash": 3,
-}
+# Probability of STAYING in a regime each bar → mean duration ≈ 1/(1-stay).
+_STAY = {"trend_up": 0.955, "trend_down": 0.945, "range": 0.955,
+         "high_vol": 0.910, "low_vol": 0.960}
+
+# Difficulty tier by headline regime (calmer = easier). Kept for make_scenario_spec.
+REGIME_TIER = {"low_vol": 1, "range": 1, "trend_up": 1, "trend_down": 2, "high_vol": 3}
+
+# GARCH(1,1) on the standardized innovation: unconditional variance = 1.
+_G_OMEGA, _G_ALPHA, _G_BETA = 0.02, 0.10, 0.88   # alpha+beta = 0.98 → persistent
+_T_DF = 8                                          # Student-t d.o.f. → fat tails (moderate)
+_BASE_VOL = 0.0105                                 # overall per-bar vol scale
+_WICK = 0.42                                       # wick size vs volatility
 
 
-def _phase_plan(regime, n, rng):
-    """Return a list of length n giving the active regime at each bar. Headline
-    regimes like 'crash'/'bubble_pop' are scripted as a sequence of phases; the
-    plain regimes run throughout with light variation."""
-    def blocks(spec):
-        out = []
-        for reg, frac in spec:
-            out += [reg] * max(1, int(round(frac * n)))
-        # pad/trim to exactly n
-        while len(out) < n:
-            out.append(spec[-1][0])
-        return out[:n]
+def _student_t(rng, df=_T_DF):
+    """A standardized (unit-variance) Student-t draw — Gaussian core with a
+    heavy tail. Pure stdlib: t = z / sqrt(chi2_df / df)."""
+    z = rng.gauss(0, 1)
+    chi2 = sum(rng.gauss(0, 1) ** 2 for _ in range(df))
+    t = z / math.sqrt(chi2 / df) if chi2 > 0 else z
+    return t * math.sqrt((df - 2) / df)   # rescale to unit variance
 
-    if regime == "crash":
-        return blocks([("trend_up", 0.42), ("range", 0.18),
-                       ("crash", 0.15), ("high_vol", 0.25)])
-    if regime == "bubble_pop":
-        return blocks([("trend_up", 0.28), ("bubble", 0.34),
-                       ("crash", 0.12), ("trend_down", 0.26)])
-    if regime == "trend_up":
-        # steady climb with occasional range pullbacks
-        return [("range" if rng.random() < 0.18 else "trend_up") for _ in range(n)]
-    if regime == "trend_down":
-        return [("range" if rng.random() < 0.18 else "trend_down") for _ in range(n)]
-    if regime == "high_vol":
-        return ["high_vol"] * n
-    # range (default): mean-reverting throughout
-    return ["range"] * n
+
+def _regime_path(n, rng, start=None, home_bias=0.55):
+    """A Markov regime sequence of length n. The requested regime is the *home*
+    state: the market spends most of its time there but takes excursions into
+    other regimes and returns — so a 'high_vol' scenario is genuinely choppier
+    than a 'low_vol' one, while switch timings differ per seed (no templates)."""
+    home = start if start in REGIME_CFG else None
+    cur = home or rng.choice(REGIMES)
+    path = []
+    for _ in range(n):
+        path.append(cur)
+        if rng.random() > _STAY[cur]:
+            if home and cur != home and rng.random() < home_bias:
+                cur = home                                    # drift back home
+            else:
+                cur = rng.choice([s for s in REGIMES if s != cur])
+    return path
 
 
 def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
-                    events=None):
-    """Generate an OHLCV series for a headline regime. Deterministic for a given
-    seed. Guarantees positive prices and OHLC consistency
-    (low <= min(o,c) <= max(o,c) <= high).
+                    events=None, difficulty=2, gap_prob=0.0):
+    """Generate an OHLCV series. Deterministic for a given seed. Guarantees
+    positive prices and OHLC consistency (low ≤ min(o,c) ≤ max(o,c) ≤ high).
 
-    `events` (optional) is a list of {bar, sentiment, impact} dicts — a scripted
-    news reaction: at the event bar the price jumps by sentiment*impact and
-    volatility spikes for the following few bars (the whipsaw the lessons teach).
+    `regime` biases the opening/dominant regime; the Markov chain still switches.
+    `events` (optional): [{bar, sentiment, impact}] — a scripted news reaction
+    (signed shock + volatility spike) baked into the price at that bar.
+    `difficulty` (1–3) scales how often liquidity sweeps / failed breakouts fire.
+    `gap_prob`: per-bar probability of an opening gap (asset personality, Phase 6).
     """
     rng = random.Random(seed)
-    plan = _phase_plan(regime, n_bars, rng)
+    plan = _regime_path(n_bars, rng, start=regime)
     ev_by_bar = {int(e["bar"]): e for e in (events or [])}
+
+    # smoothing state (blended drift/vol so regimes don't snap)
+    tau = rng.uniform(3.0, 8.0)
+    mu_eff = REGIME_CFG[plan[0]]["mu"]
+    vol_eff = REGIME_CFG[plan[0]]["vol"]
+
+    # GARCH state (variance of the standardized innovation) + last shock
+    h = 1.0
+    last_a = 0.0
+
+    # ATR expansion/compression cycle (slow multiplicative oscillator)
+    atr_period = rng.uniform(45, 95)
+    atr_phase = rng.uniform(0, 2 * math.pi)
+    atr_amp = 0.42
+
+    # structure memory
+    swing_hi = swing_lo = start_price
+    sweep_bias = 0        # +/-1 reversal push for the bar(s) after a sweep
+    sweep_left = 0
+    sweep_freq = 0.010 + 0.010 * difficulty   # scales with difficulty
 
     bars = []
     price = float(start_price)
-    vol_mult = 1.0          # volatility-clustering state (GARCH-ish persistence)
-    # range-regime anchor for mean reversion / false breakouts
-    anchor = price
+    recent_high = recent_low = price
 
     for i in range(n_bars):
-        reg = plan[i]
-        p = REGIME_PARAMS[reg]
-        # Volatility clustering: decay toward 1, spike after a big shock.
-        sigma = p["sigma"] * vol_mult
-        z = rng.gauss(0, 1)
+        target = REGIME_CFG[plan[i]]
+        mu_eff += (target["mu"] - mu_eff) / tau
+        vol_eff += (target["vol"] - vol_eff) / tau
 
-        mu = p["mu"]
-        if reg == "range":
-            # pull back toward the anchor so it oscillates instead of drifting
-            mu += -0.06 * math.log(price / anchor)
-        elif reg == "bubble":
-            # accelerate as the bubble inflates
-            mu *= 1.0 + 0.5 * (i / n_bars)
+        # GARCH conditional variance + fat-tailed standardized innovation
+        h = _G_OMEGA + _G_ALPHA * (last_a ** 2) + _G_BETA * h
+        z = _student_t(rng)
+        a = math.sqrt(h) * z
+        last_a = a
 
-        log_ret = mu + sigma * z
-        # occasional jump/gap
-        if rng.random() < p["jump_p"]:
-            log_ret += p["jump"] * (0.5 + rng.random())
+        atr = 1.0 + atr_amp * math.sin(2 * math.pi * i / atr_period + atr_phase)
+        sigma = _BASE_VOL * vol_eff * max(0.35, atr)
+        log_ret = mu_eff + sigma * a
 
-        # scripted news reaction: a signed shock + a volatility spike/whipsaw
+        # scripted news reaction (kept from the old engine)
         ev = ev_by_bar.get(i)
         if ev is not None:
             log_ret += ev.get("sentiment", 0) * ev.get("impact", 0.05)
-            sigma *= 2.2
-            vol_mult = max(vol_mult, 2.4)
+            vol_eff = max(vol_eff, 2.2)
+
+        # structure: reversal push lingering after a liquidity sweep
+        if sweep_left > 0:
+            log_ret += sweep_bias * sigma * 1.1
+            sweep_left -= 1
 
         open_ = price
-        # small gap between bars sometimes (open away from prior close)
-        if i > 0 and rng.random() < 0.06:
-            open_ = price * math.exp(sigma * rng.gauss(0, 1) * 0.8)
+        if i > 0 and rng.random() < gap_prob:
+            open_ = price * math.exp(sigma * rng.gauss(0, 1) * 1.2)   # gap open
 
         close = max(1e-6, open_ * math.exp(log_ret))
 
-        hi_base = max(open_, close)
-        lo_base = min(open_, close)
-        high = hi_base * math.exp(abs(rng.gauss(0, 1)) * sigma * 0.7)
-        low = lo_base * math.exp(-abs(rng.gauss(0, 1)) * sigma * 0.7)
-        low = max(1e-6, min(low, lo_base))
-        high = max(high, hi_base)
+        # ── wicks / candlestick geometry ──────────────────────────────────
+        hi_base, lo_base = max(open_, close), min(open_, close)
+        up_wick = abs(_student_t(rng)) * sigma * _WICK
+        dn_wick = abs(_student_t(rng)) * sigma * _WICK
+        high = hi_base * math.exp(up_wick)
+        low = lo_base * math.exp(-dn_wick)
 
-        rng_pct = (high - low) / close if close else 0.0
-        volume = round(1000 * (1 + 6 * rng_pct) * (0.6 + 0.8 * rng.random()), 2)
+        # ── liquidity sweep: poke just beyond a nearby prior extreme, close back
+        if sweep_left == 0 and rng.random() < sweep_freq:
+            if abs(close - recent_high) / close < 0.02 and rng.random() < 0.5:
+                high = max(high, recent_high * math.exp(sigma * (0.6 + rng.random())))
+                close = min(close, recent_high * math.exp(-sigma * 0.3))
+                sweep_bias, sweep_left = -1, rng.randint(1, 2)
+            elif abs(close - recent_low) / close < 0.02:
+                low = min(low, recent_low * math.exp(-sigma * (0.6 + rng.random())))
+                close = max(close, recent_low * math.exp(sigma * 0.3))
+                sweep_bias, sweep_left = +1, rng.randint(1, 2)
 
-        bars.append({
-            "open": round(open_, 4), "high": round(high, 4),
-            "low": round(low, 4), "close": round(close, 4), "volume": volume,
-        })
+        # ── failed breakout: small break of a recent level often snaps back
+        elif close > recent_high and (close - recent_high) / close < 0.006 and rng.random() < 0.35:
+            close = recent_high * math.exp(-sigma * 0.2)
+        elif close < recent_low and (recent_low - close) / close < 0.006 and rng.random() < 0.35:
+            close = recent_low * math.exp(sigma * 0.2)
 
-        # update state for next bar
+        # enforce OHLC validity after any structural adjustment
+        low = max(1e-6, min(low, open_, close))
+        high = max(high, open_, close)
+
+        # ── volume: quiet base, spikes on wide-range / breakout bars ──────
+        range_pct = (high - low) / close if close else 0.0
+        breakout = 1.0 if abs(a) > 1.6 else 0.0
+        volume = round(1000 * (0.5 + 5.0 * range_pct + 1.8 * breakout) * (0.7 + 0.6 * rng.random()), 2)
+
+        bars.append({"open": round(open_, 4), "high": round(high, 4),
+                     "low": round(low, 4), "close": round(close, 4), "volume": volume})
+
+        # update memory
         price = close
-        vol_mult = 0.82 * vol_mult + 0.18 * (1.0 + 1.4 * abs(z))
-        vol_mult = min(vol_mult, 4.0)
-        if reg != "range":
-            anchor = price   # only the range regime mean-reverts
+        recent_high = max(recent_high * 0.985 + close * 0.015, high) if i else high
+        recent_low = min(recent_low * 0.985 + close * 0.015, low) if i else low
+        # track slow swing extremes for the next sweep target
+        swing_hi = max(swing_hi * 0.97 + high * 0.03, high * 0.999)
+        swing_lo = min(swing_lo * 0.97 + low * 0.03, low * 1.001)
 
     return bars
 
@@ -153,10 +206,7 @@ def make_scenario_spec(regime, seed):
     }
 
 
-# ── News events (Phase E step 2) ──────────────────────────────────────────
-# Clearly-fictional headlines. Each has a category, a sentiment (+1 bullish /
-# -1 bearish), and a rough reaction size. Copy is neutral/educational — it
-# describes what markets do, never "how to profit".
+# ── News events (kept from Phase E step 2) ────────────────────────────────
 NEWS_TEMPLATES = [
     {"category": "rate_decision", "sentiment": -1, "impact": 0.055,
      "headline": "Central bank hikes rates more than expected",
@@ -183,15 +233,12 @@ NEWS_TEMPLATES = [
 
 
 def build_news_scenario(seed, n_bars=140, regime=None):
-    """Build a 'Scenario Mode' series with 3–5 scripted news events baked into
-    the price. Returns (bars, events) where each event carries its headline
-    metadata AND the bar it breaks on, and the bars already contain the
-    reaction. Deterministic for a given seed."""
+    """A 'Scenario Mode' series with 3–5 scripted news events baked into the
+    price. Returns (bars, events). Deterministic for a given seed."""
     rng = random.Random(seed)
     base_regime = regime or rng.choice(["trend_up", "range", "trend_down", "high_vol"])
 
     n_events = rng.randint(3, 5)
-    # space events out, keeping clear of the very start/end
     lo, hi = int(n_bars * 0.15), int(n_bars * 0.9)
     bars_for_events = sorted(rng.sample(range(lo, hi), n_events))
 
@@ -199,11 +246,8 @@ def build_news_scenario(seed, n_bars=140, regime=None):
     for bar in bars_for_events:
         tpl = rng.choice(NEWS_TEMPLATES)
         events.append({
-            "bar": bar,
-            "category": tpl["category"],
-            "headline": tpl["headline"],
-            "detail": tpl["detail"],
-            "sentiment": tpl["sentiment"],
+            "bar": bar, "category": tpl["category"], "headline": tpl["headline"],
+            "detail": tpl["detail"], "sentiment": tpl["sentiment"],
             "impact": round(tpl["impact"] * (0.8 + 0.4 * rng.random()), 4),
         })
 
@@ -211,10 +255,7 @@ def build_news_scenario(seed, n_bars=140, regime=None):
     return bars, events
 
 
-# ── Scam / pump-and-dump scenarios (Phase E step 3) ──────────────────────
-# Fictional promoter handles for the hype feed. The point of these scenarios is
-# to teach RECOGNITION of a pump-and-dump, never how to run one — the debrief
-# spells out the tells and the copy stays satirical of hype, not instructional.
+# ── Scam / pump-and-dump scenarios (kept from Phase E step 3) ─────────────
 SHILL_HANDLES = ["@MoonBoyCapital", "@AlphaGuru", "@100xCaller",
                  "@DiamondHandsDan", "@EarlyWhale"]
 SHILL_POSTS = [
@@ -228,10 +269,8 @@ SHILL_POSTS = [
 
 
 def build_scam_scenario(seed, n_bars=120, start_price=20.0):
-    """A pump-and-dump: a quiet base, an accelerating ramp on THIN volume while
-    promoters hype it, then a violent rug when liquidity vanishes. Returns
-    (bars, events) where events are the escalating hype posts plus a 'rug'
-    marker at the top. Deterministic for a given seed."""
+    """A pump-and-dump: quiet base → ramp on THIN volume with escalating hype →
+    a violent rug. Returns (bars, events). Deterministic for a given seed."""
     rng = random.Random(seed)
     pump_start = int(n_bars * 0.30)
     rug_bar = int(n_bars * 0.66)
@@ -241,14 +280,14 @@ def build_scam_scenario(seed, n_bars=120, start_price=20.0):
     price = float(start_price)
     for i in range(n_bars):
         if i < pump_start:
-            mu, sigma, volf = 0.0004, 0.010, 1.0         # quiet base, normal volume
+            mu, sigma, volf = 0.0004, 0.010, 1.0
         elif i < rug_bar:
             prog = (i - pump_start) / max(1, (rug_bar - pump_start))
-            mu, sigma, volf = 0.020 + 0.030 * prog, 0.022, 0.35   # ramp on THIN volume
+            mu, sigma, volf = 0.020 + 0.030 * prog, 0.022, 0.35
         elif i < rug_bar + rug_len:
-            mu, sigma, volf = -0.16, 0.05, 3.2           # the rug: crash on huge volume
+            mu, sigma, volf = -0.16, 0.05, 3.2
         else:
-            mu, sigma, volf = -0.004, 0.020, 0.5         # dead, drifting lower
+            mu, sigma, volf = -0.004, 0.020, 0.5
 
         z = rng.gauss(0, 1)
         log_ret = mu + sigma * z
@@ -264,25 +303,18 @@ def build_scam_scenario(seed, n_bars=120, start_price=20.0):
                      "low": round(lo, 4), "close": round(close, 4), "volume": volume})
         price = close
 
-    # Escalating hype through the pump, then the rug alert at the top.
     events = []
     n_posts = min(len(SHILL_POSTS), 5)
     for k in range(n_posts):
         bar = pump_start + int((rug_bar - pump_start) * (k + 1) / (n_posts + 1))
-        events.append({
-            "bar": bar, "category": "hype", "sentiment": 1, "impact": 0.0,
-            "headline": SHILL_POSTS[k],
-            "detail": rng.choice(SHILL_HANDLES),
-        })
-    events.append({
-        "bar": rug_bar, "category": "rug", "sentiment": -1, "impact": 0.0,
-        "headline": "Liquidity pulled — the price collapses",
-        "detail": "The promoters went quiet at the top. This is the rug.",
-    })
+        events.append({"bar": bar, "category": "hype", "sentiment": 1, "impact": 0.0,
+                       "headline": SHILL_POSTS[k], "detail": rng.choice(SHILL_HANDLES)})
+    events.append({"bar": rug_bar, "category": "rug", "sentiment": -1, "impact": 0.0,
+                   "headline": "Liquidity pulled — the price collapses",
+                   "detail": "The promoters went quiet at the top. This is the rug."})
     return bars, events
 
 
-# Recognise-a-scam checklist used in the post-scenario debrief.
 SCAM_ANATOMY = [
     "The ramp came on THIN volume — few real buyers, easy to push.",
     "Anonymous promoters posted escalating urgency: 'don't miss out', 'so early'.",
