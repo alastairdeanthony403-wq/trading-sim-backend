@@ -9,13 +9,15 @@ notes, each linked to an academy lesson.
 import os
 import json
 import requests
-from app.models.scenario import ScenarioBar
+from app import bar_provider
+from app.models.scenario import Scenario
 
 
 def _bars_for(scenario_id):
-    rows = (ScenarioBar.query.filter_by(scenario_id=scenario_id)
-            .order_by(ScenarioBar.bar_sequence).all())
-    return {b.bar_sequence: b for b in rows}
+    scenario = Scenario.query.get(scenario_id)
+    if scenario is None:
+        return {}
+    return {b.bar_sequence: b for b in bar_provider.series(scenario)}
 
 
 def _excursions(trade, bars):

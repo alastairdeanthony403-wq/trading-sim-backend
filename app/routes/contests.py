@@ -9,11 +9,12 @@ import random
 import string
 from datetime import date, datetime, timezone, timedelta
 from flask import Blueprint, jsonify, request
-from app import db
-from app.models.scenario import Scenario, ScenarioBar
+from app import db, bar_provider
+from app.models.scenario import Scenario
 from app.models.session import Session
 from app.models.competition import Contest, ContestEntry, League, LeagueMember
-from app.synthetic import generate_series, REGIMES
+from app.synthetic import REGIMES
+from app.engine import CURRENT_ENGINE
 from app.routes.game import _finalize_session
 
 bp = Blueprint("contests", __name__)
@@ -36,17 +37,16 @@ def _ensure_current_contest():
         return c
     seed = int(ws.strftime("%Y%m%d"))
     regime = REGIMES[seed % len(REGIMES)]
-    bars = generate_series(regime=regime, n_bars=CONTEST_BARS, seed=seed)
+    # Seed-only + version-pinned: no bars persisted, and the engine version is
+    # frozen so a future engine change can never rewrite an in-flight contest.
     sc = Scenario(name_internal=f"contest_{ws.isoformat()}", asset_class="synthetic",
                   timeframe="1D", difficulty_tier=2,
                   tags=["contest", "synthetic", regime], is_active=True,
-                  history_bars=CONTEST_HISTORY)
+                  history_bars=CONTEST_HISTORY, engine_version=CURRENT_ENGINE,
+                  seed=seed, gen_params={"kind": "regime", "n_bars": CONTEST_BARS,
+                                         "regime": regime})
     db.session.add(sc)
     db.session.flush()
-    for i, b in enumerate(bars):
-        db.session.add(ScenarioBar(scenario_id=sc.id, bar_sequence=i,
-                                   open=b["open"], high=b["high"], low=b["low"],
-                                   close=b["close"], volume=b["volume"]))
     c = Contest(week_start=ws, scenario_id=sc.id, is_active=True,
                 title=f"Weekly Challenge — {regime.replace('_', ' ').title()}")
     db.session.add(c)
@@ -70,7 +70,7 @@ def current_contest():
         e = ContestEntry.query.filter_by(contest_id=c.id, user_id=user_id).first()
         if e:
             your = _entry_view(e)
-    bar_count = ScenarioBar.query.filter_by(scenario_id=c.scenario_id).count()
+    bar_count = bar_provider.count(Scenario.query.get(c.scenario_id))
     return jsonify({
         "contest_id": c.id,
         "week_start": c.week_start.isoformat(),
@@ -126,9 +126,7 @@ def submit_contest(contest_id):
     # the actual run (mirrors the normal end-of-session flatten on the client).
     if session.status == "in_progress":
         from app.routes.game import _settle_trade, _cost_model
-        last = (ScenarioBar.query
-                .filter_by(scenario_id=session.scenario_id, bar_sequence=session.bars_served or 0)
-                .first())
+        last = bar_provider.at(Scenario.query.get(session.scenario_id), session.bars_served or 0)
         if last:
             slip = _cost_model(session)["slippage_pct"]
             for t in session.trades:
