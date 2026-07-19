@@ -79,7 +79,7 @@ def _regime_path(n, rng, start=None, home_bias=0.55):
 
 
 def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
-                    events=None, difficulty=2, gap_prob=0.0):
+                    events=None, difficulty=2, gap_prob=0.0, vol_scale=1.0):
     """Generate an OHLCV series. Deterministic for a given seed. Guarantees
     positive prices and OHLC consistency (low ≤ min(o,c) ≤ max(o,c) ≤ high).
 
@@ -88,6 +88,10 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
     (signed shock + volatility spike) baked into the price at that bar.
     `difficulty` (1–3) scales how often liquidity sweeps / failed breakouts fire.
     `gap_prob`: per-bar probability of an opening gap (asset personality, Phase 6).
+    `vol_scale`: per-bar drift+volatility multiplier. 1.0 → the daily scale used
+    everywhere so far (unchanged). Intraday 1-minute series pass a small value so
+    a single bar moves like a minute, not a day; the shape of the process is
+    otherwise identical (Phase 2 multi-timeframe).
     """
     rng = random.Random(seed)
     plan = _regime_path(n_bars, rng, start=regime)
@@ -129,8 +133,8 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
         last_a = a
 
         atr = 1.0 + atr_amp * math.sin(2 * math.pi * i / atr_period + atr_phase)
-        sigma = _BASE_VOL * vol_eff * max(0.35, atr)
-        log_ret = mu_eff + sigma * a
+        sigma = _BASE_VOL * vol_scale * vol_eff * max(0.35, atr)
+        log_ret = mu_eff * vol_scale + sigma * a
 
         # scripted news reaction (kept from the old engine)
         ev = ev_by_bar.get(i)
@@ -194,6 +198,18 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
         swing_lo = min(swing_lo * 0.97 + low * 0.03, low * 1.001)
 
     return bars
+
+
+def generate_intraday_series(seed, days=7, bars_per_day=390, regime="range",
+                             start_price=100.0, vol_scale=0.15):
+    """~`days` sessions of 1-minute bars — the source of truth for multi-timeframe
+    intraday scenarios. Every higher timeframe (5m/15m/30m/1h/4h) is *aggregated*
+    from these 1m bars, so the timeframes can never disagree. Per-bar volatility
+    is scaled down so 1-minute candles look like minutes rather than days.
+    Deterministic for a given seed. Returns days*bars_per_day bar dicts."""
+    n = int(days) * int(bars_per_day)
+    return generate_series(regime=regime, n_bars=n, seed=seed,
+                           start_price=start_price, vol_scale=vol_scale)
 
 
 def make_scenario_spec(regime, seed):

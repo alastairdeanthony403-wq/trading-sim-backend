@@ -24,6 +24,14 @@ class Scenario(db.Model):
     seed = db.Column(db.BigInteger, nullable=True)
     gen_params = db.Column(db.JSON, nullable=True)   # {kind, n_bars, regime, ...}
 
+    # ── Multi-timeframe (Phase 2) ─────────────────────────────────────────
+    # Intraday scenarios store a 1-minute base series and can be viewed on
+    # several timeframes (aggregated on read). base_timeframe is the unit the
+    # stored/generated bars are in; available_timeframes lists what the chart may
+    # switch to. Both NULL → single-timeframe scenario (the timeframe column).
+    base_timeframe = db.Column(db.String(8), nullable=True)
+    available_timeframes = db.Column(db.ARRAY(db.String), nullable=True)
+
     bars = db.relationship("ScenarioBar", backref="scenario", lazy=True, cascade="all, delete-orphan")
 
     @property
