@@ -78,19 +78,24 @@ def db_upgrade():
 
 @bp.route("/setup/generate-scenarios", methods=["POST"])
 def generate_scenarios():
-    """Mint synthetic regime-switching scenarios (Phase E). No external API, so
-    this is unlimited and safe to re-run. Body (all optional):
+    """Mint synthetic regime-switching scenarios (Phase E + 6). No external API, so
+    this is unlimited and safe to re-run. When asset_class is a real market
+    (crypto/forex/indices/commodities/stocks) the series takes on that market's
+    PERSONALITY (Phase 6); an optional correlated benchmark line can be attached.
+    Body (all optional):
         {"regimes": ["crash","range",...],  # defaults to all regimes
          "per_regime": 2,                    # how many of each
-         "n_bars": 120,
-         "asset_class": "synthetic",
+         "history_bars": 300, "playback_bars": 160,
+         "asset_class": "synthetic",         # crypto|forex|indices|commodities|stocks → personality
+         "benchmark": false, "rho": 0.7,     # attach a correlated benchmark line
          "seed": 12345}                       # base seed for reproducibility
     """
     if not _authorized():
         return jsonify({"error": "unauthorized"}), 401
 
     from app.models.scenario import Scenario
-    from app.synthetic import make_scenario_spec, REGIMES
+    from app.synthetic import make_scenario_spec, REGIMES, ASSET_PROFILES
+
     from app.engine import CURRENT_ENGINE
 
     body = request.get_json(silent=True) or {}
@@ -101,6 +106,10 @@ def generate_scenarios():
     playback_bars = int(body.get("playback_bars", 160))
     n_bars = history_bars + playback_bars
     asset_class = body.get("asset_class", "synthetic")
+    # Only a recognised market class carries a personality; synthetic stays neutral.
+    asset = asset_class if asset_class in ASSET_PROFILES else None
+    benchmark = bool(body.get("benchmark", False))
+    rho = float(body.get("rho", 0.7))
     base_seed = body.get("seed")
     base = int(base_seed) if base_seed is not None else random.randint(1, 10 ** 9)
 
@@ -112,22 +121,32 @@ def generate_scenarios():
         for k in range(per_regime):
             seed = base + hash(regime) % 100000 + k
             spec = make_scenario_spec(regime, seed)
+            gen_params = {"kind": "regime", "n_bars": n_bars, "regime": regime}
+            if asset:
+                gen_params["asset"] = asset
+            if benchmark:
+                gen_params["benchmark"] = True
+                gen_params["rho"] = rho
+            tags = list(spec["tags"]) + ([asset] if asset else [])
             # Seed-only: no bars persisted — stored seed + version regenerate them.
             scenario = Scenario(
                 name_internal=spec["name_internal"],
                 asset_class=asset_class,
                 timeframe="1D",
                 difficulty_tier=spec["difficulty_tier"],
-                tags=spec["tags"],
+                tags=tags,
                 is_active=True,
                 history_bars=history_bars,
                 engine_version=CURRENT_ENGINE, seed=seed,
-                gen_params={"kind": "regime", "n_bars": n_bars, "regime": regime},
+                gen_params=gen_params,
             )
             db.session.add(scenario)
             db.session.commit()
             created.append({"regime": regime, "scenario_id": scenario.id,
                             "bars": n_bars, "history_bars": history_bars,
+                            "asset_class": asset_class,
+                            "personality": ASSET_PROFILES[asset]["label"] if asset else None,
+                            "benchmark": benchmark,
                             "tier": spec["difficulty_tier"], "status": "created"})
 
     return jsonify({"status": "ok", "results": created})

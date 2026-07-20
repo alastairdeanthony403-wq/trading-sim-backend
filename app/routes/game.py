@@ -50,6 +50,13 @@ def _session_meta(scenario):
             "session_bands": session_bands(profile)}
 
 
+def _personality_label(scenario):
+    """Short asset-personality descriptor for the scenario list (Phase 6)."""
+    from app.synthetic import ASSET_PROFILES
+    asset = (scenario.gen_params or {}).get("asset")
+    return ASSET_PROFILES[asset]["label"] if asset in ASSET_PROFILES else None
+
+
 def _fm_risk_check(session, direction, entry_price, stop_loss, size):
     """Fund Manager mode gate applied at order time: client money must have a
     defined stop and may risk no more than FM_MAX_RISK_PCT of the fund. Returns
@@ -239,6 +246,7 @@ def list_scenarios():
             "market_unlocked": is_unlocked(s.asset_class),
             "available_timeframes": bar_provider.available_timeframes(s),
             "base_timeframe": bar_provider.base_timeframe(s),
+            "personality": _personality_label(s),
         }
         for s in scenarios
     ])
@@ -273,6 +281,8 @@ def start_session(scenario_id):
                     "available_timeframes": bar_provider.available_timeframes(scenario),
                     "anchor_tf": (scenario.gen_params or {}).get("anchor_tf")
                     if scenario.gen_params else None,
+                    # Correlated benchmark overlay available? (Phase 6)
+                    "has_reference": bar_provider.has_reference(scenario),
                     # Intraday session context (Phase 4): the profile + its bands +
                     # bars_per_day let the client show the live trading session.
                     **_session_meta(scenario)})
@@ -322,6 +332,20 @@ def get_bars(session_id):
         }
         for b in bars
     ])
+
+
+@bp.route("/sessions/<int:session_id>/reference", methods=["GET"])
+def get_reference(session_id):
+    """Correlated benchmark line for the session's scenario (Phase 6), [] if none.
+    Same reveal cap as bars (up_to in base units) so it stays server-authoritative
+    for contests."""
+    session = Session.query.get_or_404(session_id)
+    up_to = request.args.get("up_to", type=int)
+    if session.is_contest:
+        cap = session.bars_served if session.bars_served is not None else 0
+        up_to = cap if up_to is None else min(up_to, cap)
+    scenario = Scenario.query.get_or_404(session.scenario_id)
+    return jsonify(bar_provider.reference(scenario, up_to))
 
 
 @bp.route("/sessions/<int:session_id>/events", methods=["GET"])
