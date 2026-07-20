@@ -78,8 +78,61 @@ def _regime_path(n, rng, start=None, home_bias=0.55):
     return path
 
 
+# ── Intraday trading sessions (Phase 4) ───────────────────────────────────
+# Each profile splits a trading day into named sessions with a volatility
+# multiplier, so intraday markets breathe with a realistic rhythm: an active
+# open, a midday lull, a lively close (equities), or the Asia→London→NY handover
+# with a hot London/NY overlap (FX). Bands are fractions of the day [start, end).
+SESSION_PROFILES = {
+    "equity": [
+        {"name": "Open",      "start": 0.00, "end": 0.08, "vol": 1.7},
+        {"name": "Morning",   "start": 0.08, "end": 0.30, "vol": 1.15},
+        {"name": "Midday",    "start": 0.30, "end": 0.62, "vol": 0.72},
+        {"name": "Afternoon", "start": 0.62, "end": 0.90, "vol": 1.0},
+        {"name": "Close",     "start": 0.90, "end": 1.00, "vol": 1.5},
+    ],
+    "fx": [
+        {"name": "Asia",         "start": 0.00, "end": 0.33, "vol": 0.75},
+        {"name": "London",       "start": 0.33, "end": 0.50, "vol": 1.3},
+        {"name": "LDN/NY",       "start": 0.50, "end": 0.67, "vol": 1.75},
+        {"name": "New York",     "start": 0.67, "end": 0.92, "vol": 1.1},
+        {"name": "Late NY",      "start": 0.92, "end": 1.00, "vol": 0.7},
+    ],
+}
+
+
+def session_bands(profile="equity"):
+    """The session layout for a profile (name/start/end/vol per session)."""
+    return list(SESSION_PROFILES.get(profile, SESSION_PROFILES["equity"]))
+
+
+def session_at(frac, profile="equity"):
+    """Which session a within-day fraction [0,1) falls in: (name, vol_mult)."""
+    prof = SESSION_PROFILES.get(profile, SESSION_PROFILES["equity"])
+    for s in prof:
+        if s["start"] <= frac < s["end"]:
+            return s["name"], s["vol"]
+    return prof[-1]["name"], prof[-1]["vol"]
+
+
+def _session_vol_curve(n, bars_per_day, profile):
+    """Per-bar volatility multiplier from the session profile (length n)."""
+    prof = SESSION_PROFILES.get(profile, SESSION_PROFILES["equity"])
+    curve = []
+    for i in range(n):
+        frac = (i % bars_per_day) / bars_per_day
+        v = prof[-1]["vol"]
+        for s in prof:
+            if s["start"] <= frac < s["end"]:
+                v = s["vol"]
+                break
+        curve.append(v)
+    return curve
+
+
 def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
-                    events=None, difficulty=2, gap_prob=0.0, vol_scale=1.0):
+                    events=None, difficulty=2, gap_prob=0.0, vol_scale=1.0,
+                    bar_vol=None):
     """Generate an OHLCV series. Deterministic for a given seed. Guarantees
     positive prices and OHLC consistency (low ≤ min(o,c) ≤ max(o,c) ≤ high).
 
@@ -92,6 +145,9 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
     everywhere so far (unchanged). Intraday 1-minute series pass a small value so
     a single bar moves like a minute, not a day; the shape of the process is
     otherwise identical (Phase 2 multi-timeframe).
+    `bar_vol` (optional): a per-bar volatility multiplier sequence (length n_bars),
+    e.g. an intraday session profile so the market breathes with the trading day
+    (Phase 4). None → flat 1.0 everywhere.
     """
     rng = random.Random(seed)
     plan = _regime_path(n_bars, rng, start=regime)
@@ -133,7 +189,8 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
         last_a = a
 
         atr = 1.0 + atr_amp * math.sin(2 * math.pi * i / atr_period + atr_phase)
-        sigma = _BASE_VOL * vol_scale * vol_eff * max(0.35, atr)
+        sess = bar_vol[i] if bar_vol is not None else 1.0
+        sigma = _BASE_VOL * vol_scale * sess * vol_eff * max(0.35, atr)
         log_ret = mu_eff * vol_scale + sigma * a
 
         # scripted news reaction (kept from the old engine)
@@ -201,15 +258,21 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
 
 
 def generate_intraday_series(seed, days=7, bars_per_day=390, regime="range",
-                             start_price=100.0, vol_scale=0.15):
+                             start_price=100.0, vol_scale=0.15,
+                             session_profile="equity", events=None):
     """~`days` sessions of 1-minute bars — the source of truth for multi-timeframe
     intraday scenarios. Every higher timeframe (5m/15m/30m/1h/4h) is *aggregated*
     from these 1m bars, so the timeframes can never disagree. Per-bar volatility
-    is scaled down so 1-minute candles look like minutes rather than days.
-    Deterministic for a given seed. Returns days*bars_per_day bar dicts."""
+    is scaled down so 1-minute candles look like minutes rather than days, and a
+    trading-session profile (Phase 4) makes the day breathe — active open/close,
+    quiet midday, or the FX session handover. `events` bakes scheduled news
+    reactions into the price. Deterministic for a given seed."""
     n = int(days) * int(bars_per_day)
+    bar_vol = _session_vol_curve(n, int(bars_per_day), session_profile) \
+        if session_profile else None
     return generate_series(regime=regime, n_bars=n, seed=seed,
-                           start_price=start_price, vol_scale=vol_scale)
+                           start_price=start_price, vol_scale=vol_scale,
+                           bar_vol=bar_vol, events=events)
 
 
 def make_scenario_spec(regime, seed):

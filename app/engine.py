@@ -33,7 +33,9 @@ def _v2(params):
             bars_per_day=params.get("bars_per_day", 390),
             regime=params.get("regime", "range"),
             start_price=params.get("start_price", 100.0),
-            vol_scale=params.get("vol_scale", 0.15))
+            vol_scale=params.get("vol_scale", 0.15),
+            session_profile=params.get("session_profile", "equity"),
+            events=params.get("events"))
     if kind == "news":
         return build_news_scenario(seed, n_bars)[0]
     if kind == "scam":

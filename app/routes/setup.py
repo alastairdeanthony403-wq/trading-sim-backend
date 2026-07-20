@@ -12,6 +12,28 @@ def _authorized():
     return bool(expected_key) and provided_key == expected_key
 
 
+def _intraday_news_schedule(seed, n_bars, bars_per_day, count):
+    """Schedule `count` news releases just after session opens, deterministically
+    from the seed. Intraday impact is a fraction of the daily template size — a
+    news spike over one minute, not one day. Returns events sorted by bar."""
+    from app.synthetic import NEWS_TEMPLATES
+    rng = random.Random(seed ^ 0x9E3779B9)
+    days = max(1, n_bars // bars_per_day)
+    day_picks = (sorted(rng.sample(range(days), count)) if count <= days
+                 else [rng.randrange(days) for _ in range(count)])
+    events = []
+    for d in day_picks:
+        offset = int(bars_per_day * rng.uniform(0.02, 0.15))   # just after the open
+        bar = min(n_bars - 2, d * bars_per_day + offset)
+        tpl = rng.choice(NEWS_TEMPLATES)
+        events.append({
+            "bar": bar, "category": tpl["category"], "headline": tpl["headline"],
+            "detail": tpl["detail"], "sentiment": tpl["sentiment"],
+            "impact": round(tpl["impact"] * 0.35, 4),          # intraday-sized reaction
+        })
+    return sorted(events, key=lambda e: e["bar"])
+
+
 @bp.route("/setup/create-tables", methods=["POST"])
 def create_tables():
     if not _authorized():
@@ -113,15 +135,19 @@ def generate_scenarios():
 
 @bp.route("/setup/generate-intraday-scenarios", methods=["POST"])
 def generate_intraday_scenarios():
-    """Mint multi-timeframe INTRADAY scenarios (Phase 2). The stored series is
+    """Mint multi-timeframe INTRADAY scenarios (Phase 2 + 4). The stored series is
     1-minute bars; the chart can switch between 1m/5m/15m/30m/1h/4h (aggregated
-    on read). Seed-only — no bars persisted. Body (all optional):
+    on read). Seed-only — no bars persisted. A session profile makes the day
+    breathe (Phase 4) and an optional news toggle schedules releases at session
+    opens. Body (all optional):
         {"regimes": ["trend_up","range","high_vol"],  # one scenario per regime*per_regime
          "per_regime": 1,
          "days": 7,                 # ~trading days of 1-minute data
          "bars_per_day": 390,       # minutes per session (390 ≈ a US equity day)
          "anchor_tf": "15m",        # timeframe the chart opens on
          "history_candles": 80,     # Rule-0 pre-playback history, in anchor_tf candles
+         "session_profile": "equity",  # "equity" (U-shape) or "fx" (Asia/London/NY)
+         "news": 0,                 # scheduled news releases per scenario (0 = off)
          "asset_class": "synthetic",
          "seed": 12345}
     """
@@ -129,7 +155,8 @@ def generate_intraday_scenarios():
         return jsonify({"error": "unauthorized"}), 401
 
     from app.models.scenario import Scenario
-    from app.synthetic import make_scenario_spec, REGIMES
+    from app.models.event import ScenarioEvent
+    from app.synthetic import make_scenario_spec, REGIMES, SESSION_PROFILES
     from app.engine import CURRENT_ENGINE
     from app.bar_provider import TF_MINUTES
 
@@ -141,6 +168,10 @@ def generate_intraday_scenarios():
     anchor_tf = body.get("anchor_tf", "15m")
     anchor_mult = TF_MINUTES.get(anchor_tf, 15)
     asset_class = body.get("asset_class", "synthetic")
+    session_profile = body.get("session_profile", "equity")
+    if session_profile not in SESSION_PROFILES:
+        session_profile = "equity"
+    news = int(body.get("news", 0))
     available = ["1m", "5m", "15m", "30m", "1h", "4h"]
 
     n_bars = days * bars_per_day
@@ -162,6 +193,19 @@ def generate_intraday_scenarios():
         for k in range(per_regime):
             seed = base + hash(regime) % 100000 + k
             spec = make_scenario_spec(regime, seed)
+            # Scheduled news (Phase 4): releases at session opens, baked into the
+            # price (in gen_params so the seed regenerates the reaction) AND kept
+            # as ScenarioEvent rows for the ticker + character voices.
+            events = _intraday_news_schedule(seed, n_bars, bars_per_day, news) if news > 0 else []
+            gen_params = {"kind": "intraday", "n_bars": n_bars, "regime": regime,
+                          "days": days, "bars_per_day": bars_per_day,
+                          "vol_scale": 0.15, "anchor_tf": anchor_tf,
+                          "session_profile": session_profile}
+            if events:
+                gen_params["events"] = events
+            tags = ["synthetic", "intraday", regime]
+            if events:
+                tags.append("news")
             scenario = Scenario(
                 name_internal=f"intraday_{regime}_{seed}",
                 asset_class=asset_class,
@@ -169,19 +213,24 @@ def generate_intraday_scenarios():
                 base_timeframe="1m",
                 available_timeframes=available,
                 difficulty_tier=spec["difficulty_tier"],
-                tags=["synthetic", "intraday", regime],
+                tags=tags,
                 is_active=True,
                 history_bars=history_bars,
                 engine_version=CURRENT_ENGINE, seed=seed,
-                gen_params={"kind": "intraday", "n_bars": n_bars, "regime": regime,
-                            "days": days, "bars_per_day": bars_per_day,
-                            "vol_scale": 0.15, "anchor_tf": anchor_tf},
+                gen_params=gen_params,
             )
             db.session.add(scenario)
+            db.session.flush()
+            for e in events:
+                db.session.add(ScenarioEvent(
+                    scenario_id=scenario.id, bar_sequence=e["bar"],
+                    category=e["category"], headline=e["headline"],
+                    detail=e["detail"], sentiment=e["sentiment"], impact=e["impact"]))
             db.session.commit()
             created.append({"regime": regime, "scenario_id": scenario.id,
                             "bars_1m": n_bars, "history_bars": history_bars,
                             "anchor_tf": anchor_tf, "timeframes": available,
+                            "session_profile": session_profile, "news": len(events),
                             "tier": spec["difficulty_tier"], "status": "created"})
 
     return jsonify({"status": "ok", "results": created})
