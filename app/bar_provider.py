@@ -16,6 +16,7 @@ never disagree. Aggregation is reveal-aware: passing up_to_base only aggregates
 already-revealed base bars, so the current higher-TF candle forms from revealed
 minutes only — no future bar can leak into a coarser timeframe.
 """
+import json
 from collections import namedtuple
 from functools import lru_cache
 
@@ -26,11 +27,12 @@ TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
 
 
 @lru_cache(maxsize=512)
-def _generated(engine_version, params_items):
-    """Cached generation keyed by (engine_version, sorted gen_params items).
-    params_items is a hashable tuple so the LRU cache can key on it."""
+def _generated(engine_version, params_json):
+    """Cached generation keyed by (engine_version, canonical-JSON gen_params).
+    A JSON string key stays hashable even when params nest lists/dicts (e.g. a
+    scheduled news `events` list, Phase 4)."""
     from app import engine
-    raw = engine.generate(engine_version, dict(params_items))
+    raw = engine.generate(engine_version, json.loads(params_json))
     return tuple(Bar(i, b["open"], b["high"], b["low"], b["close"], b.get("volume"))
                  for i, b in enumerate(raw))
 
@@ -42,7 +44,7 @@ def series(scenario):
     if scenario.engine_version:
         p = dict(scenario.gen_params or {})
         p["seed"] = scenario.seed          # seed lives in its own column
-        return _generated(scenario.engine_version, tuple(sorted(p.items())))
+        return _generated(scenario.engine_version, json.dumps(p, sort_keys=True))
     from app.models.scenario import ScenarioBar
     rows = (ScenarioBar.query.filter_by(scenario_id=scenario.id)
             .order_by(ScenarioBar.bar_sequence).all())

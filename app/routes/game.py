@@ -37,6 +37,19 @@ def _cost_model(session):
     return ASSET_COST_MODELS.get(ac, {"slippage_pct": SLIPPAGE_PCT, "commission": COMMISSION_PER_TRADE})
 
 
+def _session_meta(scenario):
+    """Intraday trading-session context for the client (Phase 4). The session
+    schedule is public knowledge (you always know the time of day), so exposing
+    it live is not a leak. Empty for non-intraday scenarios."""
+    p = scenario.gen_params or {}
+    if p.get("kind") != "intraday":
+        return {}
+    from app.synthetic import session_bands
+    profile = p.get("session_profile", "equity")
+    return {"session_profile": profile, "bars_per_day": p.get("bars_per_day", 390),
+            "session_bands": session_bands(profile)}
+
+
 def _fm_risk_check(session, direction, entry_price, stop_loss, size):
     """Fund Manager mode gate applied at order time: client money must have a
     defined stop and may risk no more than FM_MAX_RISK_PCT of the fund. Returns
@@ -259,7 +272,10 @@ def start_session(scenario_id):
                     "base_timeframe": bar_provider.base_timeframe(scenario),
                     "available_timeframes": bar_provider.available_timeframes(scenario),
                     "anchor_tf": (scenario.gen_params or {}).get("anchor_tf")
-                    if scenario.gen_params else None})
+                    if scenario.gen_params else None,
+                    # Intraday session context (Phase 4): the profile + its bands +
+                    # bars_per_day let the client show the live trading session.
+                    **_session_meta(scenario)})
 
 
 def initial_window(scenario):
