@@ -92,8 +92,13 @@ def compute_replay(session):
     # The scenario is fully revealed here, so annotating the whole series is safe.
     structure = structure_mod.annotate(series)
 
+    # Setup quality grade (Phase 5) per trade, from confluence + structure.
+    from app import setups
+    for t in trades:
+        t["setup"] = setups.grade_trade(t, series, structure)
+
     return {"trades": trades, "markers": markers, "equity_curve": equity_curve,
-            "structure": structure}
+            "structure": structure, "setup_grades": setups.summarize(trades)}
 
 
 def build_findings(session, discipline, replay):
@@ -177,6 +182,20 @@ def build_findings(session, discipline, replay):
             "poked just past the obvious level to trip stops, then reversed. Your read may "
             "have been fine; your stop just sat where everyone else's did. Place stops a little "
             "beyond the level, not right on it.", "liquidity_concepts")
+
+    # 6c) setup-quality read (Phase 5): how many entries were low-probability.
+    graded = [t for t in trades if t.get("setup")]
+    if graded:
+        cs = [t for t in graded if t["setup"]["grade"] == "C"]
+        if len(cs) >= max(1, len(graded) // 2):
+            add("warn", f"{len(cs)} of your {len(graded)} setups graded C — "
+                "low-probability entries (counter-trend, into a level, or too little "
+                "reward for the risk). A-grade setups line up trend, location and a stop "
+                "that leaves room for at least 2R.", "advanced_confluence")
+        elif all(t["setup"]["grade"] == "A" for t in graded):
+            add("good", "Every setup you took was A-grade — trend, location and "
+                "reward-for-risk all lined up. That's high-quality selection, and it's "
+                "what the score rewards.", "advanced_confluence")
 
     # 7) psychology read (Phase E) — name the impulse that showed up and tie it
     # back to the in-session character voices (the hype/aggressive pull).
