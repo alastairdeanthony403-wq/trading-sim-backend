@@ -24,7 +24,8 @@ def _v2(params):
     if kind == "regime":
         return generate_series(regime=params.get("regime", "range"),
                                n_bars=n_bars, seed=seed,
-                               start_price=params.get("start_price", 100.0))
+                               start_price=params.get("start_price", 100.0),
+                               asset=params.get("asset"))
     if kind == "intraday":
         # Intraday multi-timeframe: the stored series is 1-minute bars; higher
         # timeframes are aggregated on read (bar_provider). n_bars == days*bars_per_day.

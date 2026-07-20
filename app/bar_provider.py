@@ -120,3 +120,25 @@ def available_timeframes(scenario):
 
 def base_timeframe(scenario):
     return getattr(scenario, "base_timeframe", None) or scenario.timeframe
+
+
+# ── Correlated benchmark line (Phase 6) ───────────────────────────────────
+
+def has_reference(scenario):
+    return bool((scenario.gen_params or {}).get("benchmark"))
+
+
+def reference(scenario, up_to=None):
+    """A benchmark line correlated with the scenario's series (Phase 6), or [] if
+    the scenario has none. Deterministic (derived from the primary series + a
+    fixed offset seed + rho). up_to caps it to the reveal point in base units."""
+    p = scenario.gen_params or {}
+    if not p.get("benchmark"):
+        return []
+    from app.synthetic import correlated_line
+    rho = float(p.get("rho", 0.7))
+    ref_seed = (scenario.seed or 0) ^ 0x5F3759DF
+    line = correlated_line(series(scenario), ref_seed, rho)
+    if up_to is not None:
+        line = [pt for pt in line if pt["bar_sequence"] <= up_to]
+    return line

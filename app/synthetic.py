@@ -130,9 +130,59 @@ def _session_vol_curve(n, bars_per_day, profile):
     return curve
 
 
+# ── Asset personalities (Phase 6) ─────────────────────────────────────────
+# Each market class has a behavioural signature the generator honours, so a
+# "crypto" scenario feels wild and gappy while "forex" is a smooth mean-reverting
+# range. vol_mult scales volatility, t_df sets tail fatness (lower = fatter),
+# gap_prob is the per-bar opening-gap chance, mean_rev pulls price back toward a
+# slow anchor (ranging). asset=None → the neutral behaviour used everywhere so
+# far (unchanged), so synthetic/legacy scenarios and their tests are untouched.
+ASSET_PROFILES = {
+    "crypto":      {"vol_mult": 1.7,  "t_df": 5,  "gap_prob": 0.010, "mean_rev": 0.0,
+                    "label": "Wild — high volatility, fat tails, frequent gaps"},
+    "forex":       {"vol_mult": 0.55, "t_df": 12, "gap_prob": 0.002, "mean_rev": 0.060,
+                    "label": "Smooth — low volatility, mean-reverting ranges"},
+    "indices":     {"vol_mult": 0.80, "t_df": 9,  "gap_prob": 0.006, "mean_rev": 0.004,
+                    "label": "Grind — trends with low volatility and open gaps"},
+    "commodities": {"vol_mult": 1.20, "t_df": 6,  "gap_prob": 0.008, "mean_rev": 0.0,
+                    "label": "Spiky — sharp supply-shock moves"},
+    "stocks":      {"vol_mult": 1.00, "t_df": 8,  "gap_prob": 0.007, "mean_rev": 0.0,
+                    "label": "Balanced — trends with earnings gaps"},
+}
+
+
+def asset_profile(name):
+    """Personality profile for an asset class, or None for neutral/synthetic."""
+    return ASSET_PROFILES.get(name)
+
+
+def correlated_line(base_bars, seed, rho, start=None):
+    """A benchmark line (list of {bar_sequence, value}) correlated at ~`rho` with
+    the base series' returns — e.g. a sector index the asset moves with. Built
+    from the base's log-returns + seeded idiosyncratic noise, so realized
+    correlation ≈ rho and it's deterministic. Teaches relative strength."""
+    closes = [(b["close"] if isinstance(b, dict) else b.close) for b in base_bars]
+    if len(closes) < 2:
+        return [{"bar_sequence": 0, "value": round(start or (closes[0] if closes else 100.0), 4)}]
+    rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    mu = sum(rets) / len(rets)
+    var = sum((r - mu) ** 2 for r in rets) / len(rets)
+    sd = math.sqrt(var) or 1e-9
+    rng = random.Random(seed)
+    k = math.sqrt(max(0.0, 1.0 - rho * rho))
+    value = float(start or closes[0])
+    line = [{"bar_sequence": 0, "value": round(value, 4)}]
+    for i, r in enumerate(rets, start=1):
+        zr = (r - mu) / sd
+        ref_ret = mu + sd * (rho * zr + k * rng.gauss(0, 1))
+        value = max(1e-6, value * math.exp(ref_ret))
+        line.append({"bar_sequence": i, "value": round(value, 4)})
+    return line
+
+
 def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
                     events=None, difficulty=2, gap_prob=0.0, vol_scale=1.0,
-                    bar_vol=None):
+                    bar_vol=None, asset=None):
     """Generate an OHLCV series. Deterministic for a given seed. Guarantees
     positive prices and OHLC consistency (low ≤ min(o,c) ≤ max(o,c) ≤ high).
 
@@ -148,10 +198,21 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
     `bar_vol` (optional): a per-bar volatility multiplier sequence (length n_bars),
     e.g. an intraday session profile so the market breathes with the trading day
     (Phase 4). None → flat 1.0 everywhere.
+    `asset` (optional): an asset-class personality name (crypto/forex/…) that tunes
+    volatility, tail fatness, gaps and mean-reversion (Phase 6). None → neutral.
     """
     rng = random.Random(seed)
     plan = _regime_path(n_bars, rng, start=regime)
     ev_by_bar = {int(e["bar"]): e for e in (events or [])}
+
+    # asset personality (Phase 6): neutral when asset is None → unchanged behaviour
+    prof = ASSET_PROFILES.get(asset)
+    a_vol = prof["vol_mult"] if prof else 1.0
+    a_df = prof["t_df"] if prof else _T_DF
+    a_mr = prof["mean_rev"] if prof else 0.0
+    if prof and not gap_prob:
+        gap_prob = prof["gap_prob"]
+    anchor = float(start_price)          # slow mean-reversion anchor (forex-like)
 
     # smoothing state (blended drift/vol so regimes don't snap)
     tau = rng.uniform(3.0, 8.0)
@@ -184,14 +245,16 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
 
         # GARCH conditional variance + fat-tailed standardized innovation
         h = _G_OMEGA + _G_ALPHA * (last_a ** 2) + _G_BETA * h
-        z = _student_t(rng)
+        z = _student_t(rng, a_df)
         a = math.sqrt(h) * z
         last_a = a
 
         atr = 1.0 + atr_amp * math.sin(2 * math.pi * i / atr_period + atr_phase)
         sess = bar_vol[i] if bar_vol is not None else 1.0
-        sigma = _BASE_VOL * vol_scale * sess * vol_eff * max(0.35, atr)
+        sigma = _BASE_VOL * vol_scale * a_vol * sess * vol_eff * max(0.35, atr)
         log_ret = mu_eff * vol_scale + sigma * a
+        if a_mr:                      # mean-reversion pull toward the slow anchor
+            log_ret += -a_mr * math.log(price / anchor)
 
         # scripted news reaction (kept from the old engine)
         ev = ev_by_bar.get(i)
@@ -212,8 +275,8 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
 
         # ── wicks / candlestick geometry ──────────────────────────────────
         hi_base, lo_base = max(open_, close), min(open_, close)
-        up_wick = abs(_student_t(rng)) * sigma * _WICK
-        dn_wick = abs(_student_t(rng)) * sigma * _WICK
+        up_wick = abs(_student_t(rng, a_df)) * sigma * _WICK
+        dn_wick = abs(_student_t(rng, a_df)) * sigma * _WICK
         high = hi_base * math.exp(up_wick)
         low = lo_base * math.exp(-dn_wick)
 
@@ -248,6 +311,7 @@ def generate_series(regime="range", n_bars=120, seed=None, start_price=100.0,
 
         # update memory
         price = close
+        anchor = anchor * 0.95 + close * 0.05      # ~20-bar EMA anchor for mean reversion
         recent_high = max(recent_high * 0.985 + close * 0.015, high) if i else high
         recent_low = min(recent_low * 0.985 + close * 0.015, low) if i else low
         # track slow swing extremes for the next sweep target
