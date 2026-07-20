@@ -10,14 +10,19 @@ import os
 import json
 import requests
 from app import bar_provider
+from app import structure as structure_mod
 from app.models.scenario import Scenario
 
 
-def _bars_for(scenario_id):
+def _series_for(scenario_id):
     scenario = Scenario.query.get(scenario_id)
     if scenario is None:
-        return {}
-    return {b.bar_sequence: b for b in bar_provider.series(scenario)}
+        return []
+    return list(bar_provider.series(scenario))
+
+
+def _bars_for(scenario_id):
+    return {b.bar_sequence: b for b in _series_for(scenario_id)}
 
 
 def _excursions(trade, bars):
@@ -44,7 +49,8 @@ def _excursions(trade, bars):
 
 
 def compute_replay(session):
-    bars = _bars_for(session.scenario_id)
+    series = _series_for(session.scenario_id)
+    bars = {b.bar_sequence: b for b in series}
     start = session.starting_balance or 1.0
     closed = sorted(
         [t for t in session.trades if t.status == "closed" and t.pnl is not None],
@@ -82,7 +88,12 @@ def compute_replay(session):
         eq += t.pnl
         equity_curve.append({"bar": t.bar_sequence_exited, "equity": round(eq, 2)})
 
-    return {"trades": trades, "markers": markers, "equity_curve": equity_curve}
+    # Post-session structural read (server-side only — never sent during live play).
+    # The scenario is fully revealed here, so annotating the whole series is safe.
+    structure = structure_mod.annotate(series)
+
+    return {"trades": trades, "markers": markers, "equity_curve": equity_curve,
+            "structure": structure}
 
 
 def build_findings(session, discipline, replay):
@@ -145,6 +156,27 @@ def build_findings(session, discipline, replay):
     if n > 15:
         add("info", f"{n} trades in one session is a lot — costs and marginal setups add up. "
             "Fewer, higher-conviction trades usually beat churn.", "trading_plan")
+
+    # 6b) market-structure read (Phase 3): stops that landed on a liquidity sweep.
+    # The market poked just past the obvious level to trigger stops, then reversed
+    # — the read may have been right; the stop just sat where everyone's stop sat.
+    struct = replay.get("structure") or {}
+    sweep_by_bar = {s["bar_sequence"]: s for s in struct.get("sweeps", [])}
+    swept_stops = 0
+    for t in trades:
+        if t.get("exit_reason") != "stop_loss" or t.get("bar_exited") is None:
+            continue
+        for d in (0, -1, 1):
+            s = sweep_by_bar.get(t["bar_exited"] + d)
+            if s and ((t["direction"] == "long" and s["side"] == "low") or
+                      (t["direction"] == "short" and s["side"] == "high")):
+                swept_stops += 1
+                break
+    if swept_stops:
+        add("warn", f"{swept_stops} of your stop-outs landed on a liquidity sweep — price "
+            "poked just past the obvious level to trip stops, then reversed. Your read may "
+            "have been fine; your stop just sat where everyone else's did. Place stops a little "
+            "beyond the level, not right on it.", "liquidity_concepts")
 
     # 7) psychology read (Phase E) — name the impulse that showed up and tie it
     # back to the in-session character voices (the hype/aggressive pull).
