@@ -97,8 +97,13 @@ def compute_replay(session):
     for t in trades:
         t["setup"] = setups.grade_trade(t, series, structure)
 
+    # Performance analytics (Phase 7): the standard trade stats for the review.
+    from app import analytics
+    performance = analytics.performance(trades, start)
+
     return {"trades": trades, "markers": markers, "equity_curve": equity_curve,
-            "structure": structure, "setup_grades": setups.summarize(trades)}
+            "structure": structure, "setup_grades": setups.summarize(trades),
+            "performance": performance}
 
 
 def build_findings(session, discipline, replay):
