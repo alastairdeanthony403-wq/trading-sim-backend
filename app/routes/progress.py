@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, request
+from sqlalchemy.exc import IntegrityError
 from app import db
 from app.models.progress import UserProgress, Leaderboard
 from app.models.scenario import Scenario
@@ -191,7 +192,13 @@ def get_or_create_progress(user_id):
             best_composite_score=None,
         )
         db.session.add(progress)
-        db.session.commit()
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # Get-or-create race: a concurrent request for this brand-new user
+            # inserted the row first. Roll back and read theirs instead of 500-ing.
+            db.session.rollback()
+            progress = UserProgress.query.filter_by(user_id=user_id).first()
     return progress
 
 
