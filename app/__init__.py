@@ -25,7 +25,7 @@ def create_app():
     from app.models import scenario, session, progress, mission, event, competition  # noqa: F401
     migrate.init_app(app, db)
 
-    from app.routes import health, setup, ingest, game, progress, missions, contests, academy
+    from app.routes import health, setup, ingest, game, progress, missions, contests, academy, paper
     app.register_blueprint(health.bp)
     app.register_blueprint(setup.bp)
     app.register_blueprint(ingest.bp)
@@ -34,6 +34,7 @@ def create_app():
     app.register_blueprint(missions.bp)
     app.register_blueprint(contests.bp)
     app.register_blueprint(academy.bp)
+    app.register_blueprint(paper.bp)
 
     # Self-heal: make the DB schema match the models on boot (creates missing
     # tables, adds missing columns) so a deploy can't leave endpoints 500ing on
