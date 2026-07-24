@@ -37,6 +37,13 @@ def _cost_model(session):
     return ASSET_COST_MODELS.get(ac, {"slippage_pct": SLIPPAGE_PCT, "commission": COMMISSION_PER_TRADE})
 
 
+def _reveal_capped(session):
+    """Sessions whose bars are released incrementally under a server-enforced cap
+    (bars_served): contests, and academy practice checks (Phase 1). The client can
+    never see, request or derive a bar beyond the cap."""
+    return session.is_contest or session.mode == "practice"
+
+
 def _session_meta(scenario):
     """Intraday trading-session context for the client (Phase 4). The session
     schedule is public knowledge (you always know the time of day), so exposing
@@ -303,11 +310,11 @@ def get_bars(session_id):
     session = Session.query.get_or_404(session_id)
     up_to = request.args.get("up_to", type=int)
 
-    # Contest anti-cheat: never serve bars beyond the server-tracked high-water
+    # Anti-cheat: never serve bars beyond the server-tracked high-water
     # (bars_served), no matter what up_to the client asks for. This is what
-    # stops a contestant from grabbing the whole future and computing perfect
-    # trades — future bars simply do not exist to them yet.
-    if session.is_contest:
+    # stops a contestant (or a practice learner) from grabbing the whole future
+    # and computing perfect trades — future bars simply do not exist to them yet.
+    if _reveal_capped(session):
         cap = session.bars_served if session.bars_served is not None else 0
         up_to = cap if up_to is None else min(up_to, cap)
 
@@ -341,7 +348,7 @@ def get_reference(session_id):
     for contests."""
     session = Session.query.get_or_404(session_id)
     up_to = request.args.get("up_to", type=int)
-    if session.is_contest:
+    if _reveal_capped(session):
         cap = session.bars_served if session.bars_served is not None else 0
         up_to = cap if up_to is None else min(up_to, cap)
     scenario = Scenario.query.get_or_404(session.scenario_id)
@@ -574,10 +581,10 @@ def advance(session_id):
     up_to = int((request.get_json(force=True) or {}).get("bar_sequence"))
     slip_pct = _cost_model(session)["slippage_pct"]
 
-    # Contest sessions: the SERVER is the clock. Each advance reveals exactly one
-    # new bar (ignoring whatever bar the client asked for), so a contestant can
-    # never race ahead to see the future.
-    if session.is_contest:
+    # Reveal-capped sessions (contest / practice): the SERVER is the clock. Each
+    # advance reveals exactly one new bar (ignoring whatever bar the client asked
+    # for), so a player can never race ahead to see the future.
+    if _reveal_capped(session):
         total = bar_provider.count(scenario)
         served = session.bars_served if session.bars_served is not None else 0
         served = min(total - 1, served + 1)
@@ -839,12 +846,16 @@ def _finalize_session(session):
     progress.discipline_sum = (progress.discipline_sum or 0.0) + discipline_score
     db.session.add(progress)
 
-    db.session.add(Leaderboard(
-        scenario_id=session.scenario_id,
-        user_id=session.user_id,
-        composite_score=composite,
-        achieved_at=datetime.now(timezone.utc),
-    ))
+    # Practice checks run on throwaway per-attempt scenarios, so they don't post to
+    # a per-scenario leaderboard — but their discipline/journal aggregates above
+    # still feed the career + coach (Phase 1).
+    if session.mode != "practice":
+        db.session.add(Leaderboard(
+            scenario_id=session.scenario_id,
+            user_id=session.user_id,
+            composite_score=composite,
+            achieved_at=datetime.now(timezone.utc),
+        ))
     db.session.commit()
 
     return {
