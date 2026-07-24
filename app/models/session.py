@@ -25,6 +25,26 @@ class Session(db.Model):
     score = db.relationship("SessionScore", backref="session", uselist=False, cascade="all, delete-orphan")
 
 
+class PaperSession(db.Model):
+    """Paper-trading run metadata (Phase 2). The learner analyses a warm-up block
+    first, then goes live: bars drip in over a wall-clock window governed entirely
+    by the server clock (started_at + bars_per_minute), so closing and reopening
+    resumes at the correct elapsed cursor — the market kept running."""
+    __tablename__ = "paper_sessions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.Integer, db.ForeignKey("sessions.id"), nullable=False, unique=True)
+    duration_minutes = db.Column(db.Integer, nullable=False)
+    warmup_bars = db.Column(db.Integer, nullable=False)
+    bars_per_minute = db.Column(db.Integer, nullable=False)
+    live_bars = db.Column(db.Integer, nullable=False)
+    anchor_tf = db.Column(db.String(8), nullable=False, default="15m")
+    started_at = db.Column(db.DateTime, nullable=True)   # NULL until "Go Live"
+
+    session = db.relationship("Session", backref=db.backref("paper", uselist=False,
+                                                            cascade="all, delete-orphan"))
+
+
 class Trade(db.Model):
     __tablename__ = "trades"
 

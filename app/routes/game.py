@@ -41,7 +41,7 @@ def _reveal_capped(session):
     """Sessions whose bars are released incrementally under a server-enforced cap
     (bars_served): contests, and academy practice checks (Phase 1). The client can
     never see, request or derive a bar beyond the cap."""
-    return session.is_contest or session.mode == "practice"
+    return session.is_contest or session.mode in ("practice", "paper")
 
 
 def _session_meta(scenario):
@@ -310,6 +310,13 @@ def get_bars(session_id):
     session = Session.query.get_or_404(session_id)
     up_to = request.args.get("up_to", type=int)
 
+    # Paper mode: the reveal cap is the SERVER wall clock. Recompute it before
+    # serving so the visible window matches elapsed real time (and resumes right
+    # after a reopen).
+    if session.mode == "paper":
+        from app.routes.paper import sync_paper_clock
+        sync_paper_clock(session)
+
     # Anti-cheat: never serve bars beyond the server-tracked high-water
     # (bars_served), no matter what up_to the client asks for. This is what
     # stops a contestant (or a practice learner) from grabbing the whole future
@@ -348,6 +355,9 @@ def get_reference(session_id):
     for contests."""
     session = Session.query.get_or_404(session_id)
     up_to = request.args.get("up_to", type=int)
+    if session.mode == "paper":
+        from app.routes.paper import sync_paper_clock
+        sync_paper_clock(session)
     if _reveal_capped(session):
         cap = session.bars_served if session.bars_served is not None else 0
         up_to = cap if up_to is None else min(up_to, cap)
@@ -581,10 +591,17 @@ def advance(session_id):
     up_to = int((request.get_json(force=True) or {}).get("bar_sequence"))
     slip_pct = _cost_model(session)["slippage_pct"]
 
+    # Paper mode: the SERVER wall clock decides how many bars exist. Sync it and
+    # process orders up to that cap (no per-call increment).
+    if session.mode == "paper":
+        from app.routes.paper import sync_paper_clock
+        sync_paper_clock(session)
+        up_to = session.bars_served if session.bars_served is not None else 0
+
     # Reveal-capped sessions (contest / practice): the SERVER is the clock. Each
     # advance reveals exactly one new bar (ignoring whatever bar the client asked
     # for), so a player can never race ahead to see the future.
-    if _reveal_capped(session):
+    elif _reveal_capped(session):
         total = bar_provider.count(scenario)
         served = session.bars_served if session.bars_served is not None else 0
         served = min(total - 1, served + 1)
@@ -837,19 +854,23 @@ def _finalize_session(session):
     session.ended_at = datetime.now(timezone.utc)
     db.session.commit()
 
-    progress = apply_score_to_progress(session.user_id, composite)
-    # Discipline aggregates for the career system (Phase D).
-    progress.total_trades_all = (progress.total_trades_all or 0) + disc["trades_total"]
-    progress.trades_with_stops_all = (progress.trades_with_stops_all or 0) + disc["trades_with_stops"]
-    progress.blown_count = (progress.blown_count or 0) + (1 if blown else 0)
-    progress.sessions_scored = (progress.sessions_scored or 0) + 1
-    progress.discipline_sum = (progress.discipline_sum or 0.0) + discipline_score
-    db.session.add(progress)
+    # Paper trading is deliberately LOW-STAKES: it is not career-gated, so it does
+    # not touch career progression or the discipline aggregates (Phase 2). The
+    # score is still stored and the coach/replay still read discipline live off the
+    # session, so findings surface without paper inflating the career ladder.
+    if session.mode != "paper":
+        progress = apply_score_to_progress(session.user_id, composite)
+        # Discipline aggregates for the career system (Phase D).
+        progress.total_trades_all = (progress.total_trades_all or 0) + disc["trades_total"]
+        progress.trades_with_stops_all = (progress.trades_with_stops_all or 0) + disc["trades_with_stops"]
+        progress.blown_count = (progress.blown_count or 0) + (1 if blown else 0)
+        progress.sessions_scored = (progress.sessions_scored or 0) + 1
+        progress.discipline_sum = (progress.discipline_sum or 0.0) + discipline_score
+        db.session.add(progress)
 
-    # Practice checks run on throwaway per-attempt scenarios, so they don't post to
-    # a per-scenario leaderboard — but their discipline/journal aggregates above
-    # still feed the career + coach (Phase 1).
-    if session.mode != "practice":
+    # Practice checks and paper runs use throwaway per-attempt scenarios, so they
+    # don't post to a per-scenario leaderboard.
+    if session.mode not in ("practice", "paper"):
         db.session.add(Leaderboard(
             scenario_id=session.scenario_id,
             user_id=session.user_id,
@@ -870,7 +891,8 @@ def _finalize_session(session):
         "discipline": disc,
         "blown": blown,
         "post_mortem": _post_mortem(session),
-        "newly_unlocked_tiers": progress.unlocked_scenario_tiers,
+        # Paper runs aren't career-gated, so there are no tier unlocks to report.
+        "newly_unlocked_tiers": progress.unlocked_scenario_tiers if session.mode != "paper" else [],
     }
 
 
