@@ -78,6 +78,12 @@ def paper_start():
     if duration not in DURATION_OPTIONS:
         return jsonify({"error": "invalid duration"}), 400
 
+    # Paper practice is earned in Career mode — enforce it here, not just in the UI.
+    from app.routes.progress import mode_locked_response
+    locked = mode_locked_response(user_id, "paper")
+    if locked:
+        return jsonify(locked[0]), locked[1]
+
     live_bars = duration * BARS_PER_MINUTE
     total = WARMUP_BARS + live_bars
     seed = int(body.get("seed", random.randint(1, 10 ** 9)))
