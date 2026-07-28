@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import create_app
 
+from careerhelp import promote
+
 app = create_app()
 client = app.test_client()
 
@@ -26,6 +28,8 @@ def _u():
 
 
 def _start(user):
+    # Ranked is unlocked by career progress — give the test player that progress.
+    promote(app, user, level=3)
     return client.post("/contests/current/start", json={"user_id": user}).get_json()
 
 

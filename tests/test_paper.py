@@ -19,9 +19,13 @@ from app import create_app, db, bar_provider
 from app.models.session import Session, PaperSession
 from app.models.scenario import Scenario
 from app.routes.paper import BARS_PER_MINUTE, WARMUP_BARS
+from careerhelp import promote
 
 app = create_app()
 client = app.test_client()
+
+# Paper trading is unlocked by career progress, so the test player has earned it.
+promote(app, "paper", level=2)
 
 
 def check(name, cond):
@@ -139,9 +143,15 @@ def test_full_run_5_and_60_minutes():
     _full_run(60)
 
 
-def test_paper_is_not_career_gated_and_not_on_leaderboard():
+def test_paper_does_not_feed_career_or_leaderboard():
+    """Paper is unlocked BY career progress but never feeds it back — a paper run
+    must leave the player's career aggregates exactly where they were."""
     from app.models.progress import Leaderboard, UserProgress
     uid = "paper_lowstakes"
+    promote(app, uid, level=2)
+    with app.app_context():
+        p = UserProgress.query.filter_by(user_id=uid).first()
+        before = (p.sessions_scored, p.total_trades_all, p.discipline_sum)
     r = client.post("/paper/start", json={"user_id": uid, "duration_minutes": 5}).get_json()
     sid = r["session_id"]
     client.post(f"/paper/{sid}/go-live")
@@ -152,8 +162,9 @@ def test_paper_is_not_career_gated_and_not_on_leaderboard():
         check("paper session is tagged mode=paper", sc.mode == "paper")
         rows = Leaderboard.query.filter_by(scenario_id=sc.scenario_id).count()
         check("paper never posts to a leaderboard", rows == 0)
-        prog = UserProgress.query.filter_by(user_id=uid).first()
-        check("paper does not create/inflate career progress", prog is None)
+        p2 = UserProgress.query.filter_by(user_id=uid).first()
+        after = (p2.sessions_scored, p2.total_trades_all, p2.discipline_sum)
+        check("paper does not inflate career progress", after == before)
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

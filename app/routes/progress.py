@@ -102,6 +102,11 @@ TOOL_UNLOCKS_BY_LEVEL = {
 # same entry-level market (ingest tags equities as "equity").
 MARKET_UNLOCKS = {"stocks": 1, "equity": 1, "crypto": 2, "forex": 3, "indices": 4, "commodities": 5}
 
+# Game modes → minimum career level. Career is the way in: free-form paper
+# practice opens once a player has traded a few scored sessions, and ranked play
+# once they've shown some discipline, so nobody starts on the leaderboard.
+MODE_UNLOCKS = {"paper": 2, "ranked": 3}
+
 
 def _career_metrics(user_id, progress):
     from app.models.mission import MissionAttempt
@@ -155,6 +160,49 @@ def _tools_for_level(level):
 
 def _unlocked_markets(level):
     return [m for m, req in MARKET_UNLOCKS.items() if level >= req]
+
+
+def _level_name(level):
+    for t in CAREER_LEVELS:
+        if t["level"] == level:
+            return t["name"]
+    return f"Level {level}"
+
+
+def career_level_of(user_id):
+    """This user's server-computed career level. Shared with the mode gates."""
+    progress = get_or_create_progress(user_id)
+    return _career_level(_career_metrics(user_id, progress))["level"]
+
+
+def _modes_view(level):
+    return {
+        mode: {
+            "unlocked": level >= need,
+            "min_level": need,
+            "min_level_name": _level_name(need),
+        }
+        for mode, need in MODE_UNLOCKS.items()
+    }
+
+
+def mode_locked_response(user_id, mode):
+    """None when the player may enter `mode`, else a ready-to-return 403 payload.
+    The gate lives server-side so hiding the button isn't the only thing
+    stopping a locked mode from being started."""
+    need = MODE_UNLOCKS[mode]
+    level = career_level_of(user_id)
+    if level >= need:
+        return None
+    return ({
+        "error": "mode_locked",
+        "mode": mode,
+        "career_level": level,
+        "min_level": need,
+        "min_level_name": _level_name(need),
+        "message": f"{mode.title()} unlocks at {_level_name(need)} (career level {need}). "
+                   f"Keep going in Career mode.",
+    }, 403)
 
 
 def _requirements_view(tier, metrics):
@@ -260,6 +308,7 @@ def get_career(user_id):
         "metrics": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in metrics.items()},
         "unlocked_tools": _tools_for_level(current["level"]),
         "unlocked_markets": _unlocked_markets(current["level"]),
+        "modes": _modes_view(current["level"]),
         "next": None if not nxt else {
             "level": nxt["level"], "name": nxt["name"],
             "requirements": _requirements_view(nxt, metrics),

@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import create_app, db
 from app.models.scenario import Scenario, ScenarioBar
 
+from careerhelp import promote
+
 app = create_app()
 client = app.test_client()
 
@@ -60,6 +62,7 @@ def test_legacy_scenario_falls_back_to_small_window():
 
 
 def test_contest_reveals_after_300_history():
+    promote(app, "r0c", level=3)
     s = client.post("/contests/current/start", json={"user_id": "r0c"}).get_json()
     check("contest starts with 300 bars of history served", s["bars_served"] == 300)
     # anti-cheat still holds: cannot see beyond the served window

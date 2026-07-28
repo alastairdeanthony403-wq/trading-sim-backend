@@ -90,6 +90,12 @@ def start_contest_session():
     body = request.get_json(silent=True) or {}
     user_id = body.get("user_id", "anonymous")
 
+    # Ranked is earned in Career mode — enforce it here, not just in the UI.
+    from app.routes.progress import mode_locked_response
+    locked = mode_locked_response(user_id, "ranked")
+    if locked:
+        return jsonify(locked[0]), locked[1]
+
     from app.routes.game import initial_window
     scenario = Scenario.query.get(c.scenario_id)
     session = Session(user_id=user_id, scenario_id=c.scenario_id,
