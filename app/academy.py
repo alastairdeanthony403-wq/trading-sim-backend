@@ -89,6 +89,51 @@ CHECK_CONCEPT = {
 FALLBACK_CHECKS = {"check_foundations"}
 
 
+# ── Surprise spot checks ─────────────────────────────────────────────────────
+# On top of the end-of-unit checks, a lesson can spring a SPOT CHECK: the same
+# concept-matched live market, dropped in unannounced. Which lessons trigger one
+# is decided by a hash of (user, lesson), so it's unpredictable to the learner
+# but stable for a given user — reloading can't re-roll it away, and it can't be
+# farmed for an easier draw. The market itself is still a fresh seed each attempt.
+SPOT_CHECK_ONE_IN = 3
+
+
+def _lesson_concepts():
+    """lesson id → the concept its unit teaches."""
+    from app.routes.progress import CURRICULUM
+    out = {}
+    for unit in CURRICULUM:
+        concept = CHECK_CONCEPT.get(unit["check"], "risk_stops")
+        for lesson in unit["lessons"]:
+            out[lesson] = concept
+    return out
+
+
+def lesson_triggers_spot_check(user_id, lesson_id):
+    import hashlib
+    h = hashlib.sha256(f"{user_id}:{lesson_id}".encode()).hexdigest()
+    return int(h, 16) % SPOT_CHECK_ONE_IN == 0
+
+
+def due_spot_check(user_id, completed_lessons, spot_done):
+    """The oldest completed lesson that owes a spot check, or None.
+
+    Only lessons the learner has actually finished can trigger one, so a spot
+    check always tests something already taught.
+    """
+    from app.routes.progress import CURRICULUM
+    done = set(completed_lessons or [])
+    passed = set(spot_done or [])
+    concepts = _lesson_concepts()
+    for unit in CURRICULUM:                      # curriculum order = teaching order
+        for lesson in unit["lessons"]:
+            if (lesson in done and lesson not in passed
+                    and lesson_triggers_spot_check(user_id, lesson)):
+                return {"lesson_id": lesson, "concept": concepts[lesson],
+                        "unit": unit["unit"], "unit_title": unit["title"]}
+    return None
+
+
 def concept_for_check(check_id):
     return CHECK_CONCEPT.get(check_id, "risk_stops")
 
