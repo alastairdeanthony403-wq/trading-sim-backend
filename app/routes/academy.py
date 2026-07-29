@@ -31,6 +31,7 @@ def practice_start():
     body = request.get_json(silent=True) or {}
     user_id = body.get("user_id", "anonymous")
     check_id = body.get("check_id")
+    spot_lesson = body.get("spot_lesson")          # set when this is a surprise check
     concept = academy.concept_for_check(check_id) if check_id else body.get("concept_tag")
     spec = academy.spec_for(concept)
     if not spec:
@@ -46,7 +47,7 @@ def practice_start():
         asset_class="synthetic",
         timeframe=spec.get("anchor_tf", "1D"),
         difficulty_tier=1,
-        tags=["practice", concept, regime],
+        tags=["practice", concept, regime] + ([f"spot:{spot_lesson}"] if spot_lesson else []),
         is_active=False,                              # never listed in the scenario picker
         history_bars=warmup,
         engine_version=CURRENT_ENGINE, seed=seed,
@@ -75,6 +76,33 @@ def practice_start():
         "history_bars": warmup,
         "starting_balance": session.starting_balance,
         "is_fallback": check_id in academy.FALLBACK_CHECKS if check_id else False,
+        "spot_lesson": spot_lesson,
+    })
+
+
+@bp.route("/academy/spotcheck", methods=["GET"])
+def spot_check_due():
+    """Is a surprise spot check waiting for this learner?
+
+    Server-decided and deterministic per (user, lesson) — the client can't reroll
+    it by reloading, and can't see it coming before the lesson is finished.
+    """
+    from app.routes.progress import get_or_create_progress
+    user_id = request.args.get("user_id", "anonymous")
+    progress = get_or_create_progress(user_id)
+    due = academy.due_spot_check(user_id, progress.completed_lessons,
+                                 progress.spot_checks_done)
+    if not due:
+        return jsonify({"due": False})
+    spec = academy.spec_for(due["concept"])
+    return jsonify({
+        "due": True,
+        "lesson_id": due["lesson_id"],
+        "concept": due["concept"],
+        "unit": due["unit"],
+        "unit_title": due["unit_title"],
+        "goal": spec["goal"],
+        "rules": _rule_labels(spec),
     })
 
 
@@ -122,6 +150,18 @@ def practice_grade(session_id):
     result = _finalize_session(session)              # score + journal (mode=practice)
     passed, results, disc = academy.grade(spec, session)
 
+    # A passed spot check is retired for its triggering lesson; a failed one stays
+    # due, so it can be retried on a fresh market.
+    spot_lesson = next((t.split(":", 1)[1] for t in (scenario.tags or [])
+                        if t.startswith("spot:")), None)
+    if passed and spot_lesson:
+        from app.routes.progress import get_or_create_progress
+        progress = get_or_create_progress(session.user_id)
+        done = list(progress.spot_checks_done or [])
+        if spot_lesson not in done:
+            progress.spot_checks_done = done + [spot_lesson]
+            db.session.commit()
+
     return jsonify({
         "passed": passed,
         "results": results,
@@ -130,4 +170,5 @@ def practice_grade(session_id):
         "score_composite": result.get("score_composite"),
         "discipline": result.get("discipline"),
         "blown": result.get("blown"),
+        "spot_lesson": spot_lesson,
     })
