@@ -15,6 +15,7 @@ from app import db
 from app.models.engagement import EngagementProfile, GOAL_TYPES, XpEvent
 from app.engagement.awards import import_legacy_xp
 from app.engagement.day import local_date
+from app.engagement.feedback import consistency, goal_progress, next_goal
 from app.engagement.service import (get_or_create_profile, get_or_create_day,
                                     total_xp)
 
@@ -82,6 +83,44 @@ def get_xp(user_id):
         "recent": [{"source_type": e.source_type, "source_id": e.source_id,
                     "amount": e.amount, "awarded_at": e.awarded_at.isoformat(),
                     "meta": e.meta} for e in recent],
+    })
+
+
+@bp.route("/engagement/summary/<string:user_id>", methods=["GET"])
+def get_summary(user_id):
+    """Everything the loop surfaces in one read: today's goal and how far into
+    it the learner is, the single next concrete action, XP, career standing and
+    what remains for the next tier, plus this week's consistency.
+
+    Note the path is /engagement/summary rather than /api/engagement/summary —
+    no blueprint in this app carries an /api prefix.
+    """
+    from app.routes.progress import (_career_level, _career_metrics, _level_name,
+                                     _next_tier, _requirements_view,
+                                     get_or_create_progress)
+
+    profile = get_or_create_profile(user_id)
+    today = get_or_create_day(user_id, local_date(profile.timezone))
+
+    metrics = _career_metrics(user_id, get_or_create_progress(user_id))
+    level = _career_level(metrics)["level"]
+    nxt = _next_tier(level)
+    requirements = _requirements_view(nxt, metrics) if nxt else []
+    met = sum(1 for r in requirements if r["met"])
+
+    return jsonify({
+        "user_id": user_id,
+        "total_xp": total_xp(user_id),
+        "career_level": level,
+        "career_level_name": _level_name(level),
+        "next_level_name": nxt["name"] if nxt else None,
+        "career_progress": (met / len(requirements)) if requirements else 1.0,
+        "requirements": requirements,
+        "goal": goal_progress(profile, today),
+        "next_goal": next_goal(user_id, profile, today),
+        "consistency": consistency(user_id, profile),
+        "today": _day_view(today),
+        "profile": _profile_view(profile),
     })
 
 

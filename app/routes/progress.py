@@ -335,6 +335,7 @@ def mark_complete(user_id):
 
     # XP for the learning path. Keyed on the item, so re-marking pays once.
     from app.engagement.awards import award_lesson_xp
+    from app.engagement.feedback import feedback_payload
     award = award_lesson_xp(user_id, item_id)
 
     next_item = compute_next_item(progress.completed_lessons)
@@ -343,6 +344,7 @@ def mark_complete(user_id):
         "next_item": next_item,
         "xp_awarded": award["awarded"],
         "xp_total": award["total_xp"],
+        "feedback": feedback_payload(user_id, award["awarded"]),
     })
 
 

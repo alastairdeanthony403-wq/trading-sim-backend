@@ -119,6 +119,7 @@ def submit_mission(mission_id):
     # mission's own pass/fail (and the career gating built on it) is unchanged;
     # what changed is that a profit clause no longer earns points.
     from app.engagement.awards import award_mission_xp
+    from app.engagement.feedback import feedback_payload
     award = award_mission_xp(user_id, mission, session, results)
 
     return jsonify({
@@ -126,6 +127,7 @@ def submit_mission(mission_id):
         "results": results,
         "xp_awarded": award["awarded"],
         "xp_total": award["total_xp"],
+        "feedback": feedback_payload(user_id, award["awarded"]),
         "mission": _mission_dict(mission),
     })
 

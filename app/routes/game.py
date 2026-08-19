@@ -781,6 +781,7 @@ def _finalize_session(session):
             "discipline": disc,
             "blown": session.status == "blown",
             "post_mortem": _post_mortem(session),
+            "engagement": _session_engagement(session, disc),
         }
 
     trades = [t for t in session.trades if t.pnl is not None]
@@ -908,9 +909,16 @@ def _finalize_session(session):
         "discipline": disc,
         "blown": blown,
         "post_mortem": _post_mortem(session),
+        "engagement": _session_engagement(session, disc),
         # Paper runs aren't career-gated, so there are no tier unlocks to report.
         "newly_unlocked_tiers": progress.unlocked_scenario_tiers if session.mode != "paper" else [],
     }
+
+
+def _session_engagement(session, disc):
+    """Strengths / focus / XP breakdown for the results screen (Phase 2)."""
+    from app.engagement.summary import session_summary
+    return session_summary(session, disc)
 
 
 def _post_mortem(session):
