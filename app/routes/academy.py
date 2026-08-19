@@ -163,6 +163,7 @@ def practice_grade(session_id):
             db.session.commit()
 
     from app.engagement.awards import award_spot_check_xp
+    from app.engagement.feedback import feedback_payload
     spot_award = (award_spot_check_xp(session.user_id, spot_lesson)
                   if passed and spot_lesson else None)
 
@@ -176,4 +177,6 @@ def practice_grade(session_id):
         "blown": result.get("blown"),
         "spot_lesson": spot_lesson,
         "xp_awarded": spot_award["awarded"] if spot_award else 0,
+        "feedback": feedback_payload(session.user_id,
+                                     spot_award["awarded"] if spot_award else 0),
     })
