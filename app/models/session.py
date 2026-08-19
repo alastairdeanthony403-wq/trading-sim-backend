@@ -80,6 +80,10 @@ class Trade(db.Model):
     exit_reason = db.Column(db.String(20), nullable=True)
     # leverage used (1 = cash). Margin required = notional / leverage.
     leverage = db.Column(db.Float, nullable=False, default=1.0, server_default="1")
+    # The stop declared when the position was opened, captured once and never
+    # rewritten by modify_trade. stop_loss above is the LIVE stop, so the pair
+    # is what makes "did they honour the risk they declared?" answerable.
+    entry_stop_loss = db.Column(db.Float, nullable=True)
 
 
 class SessionScore(db.Model):

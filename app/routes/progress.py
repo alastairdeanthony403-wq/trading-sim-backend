@@ -333,10 +333,16 @@ def mark_complete(user_id):
     progress.completed_lessons = list(completed)
     db.session.commit()
 
+    # XP for the learning path. Keyed on the item, so re-marking pays once.
+    from app.engagement.awards import award_lesson_xp
+    award = award_lesson_xp(user_id, item_id)
+
     next_item = compute_next_item(progress.completed_lessons)
     return jsonify({
         "completed_lessons": progress.completed_lessons,
         "next_item": next_item,
+        "xp_awarded": award["awarded"],
+        "xp_total": award["total_xp"],
     })
 
 

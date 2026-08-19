@@ -162,6 +162,10 @@ def practice_grade(session_id):
             progress.spot_checks_done = done + [spot_lesson]
             db.session.commit()
 
+    from app.engagement.awards import award_spot_check_xp
+    spot_award = (award_spot_check_xp(session.user_id, spot_lesson)
+                  if passed and spot_lesson else None)
+
     return jsonify({
         "passed": passed,
         "results": results,
@@ -171,4 +175,5 @@ def practice_grade(session_id):
         "discipline": result.get("discipline"),
         "blown": result.get("blown"),
         "spot_lesson": spot_lesson,
+        "xp_awarded": spot_award["awarded"] if spot_award else 0,
     })

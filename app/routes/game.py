@@ -506,6 +506,7 @@ def open_trade(session_id):
             bar_sequence_created=entry_bar_sequence,
             direction=direction, size=size, entry_price=entry_price,
             stop_loss=stop_loss, take_profit=take_profit,
+            entry_stop_loss=stop_loss,
             order_type="market", status="open", leverage=leverage,
             trail_distance=trail_distance,
             trail_anchor=entry_price if trail_distance is not None else None,
@@ -529,6 +530,7 @@ def open_trade(session_id):
         entry_price=float(entry_order_price),      # provisional
         entry_order_price=float(entry_order_price),
         stop_loss=stop_loss, take_profit=take_profit,
+        entry_stop_loss=stop_loss,
         order_type=order_type, status="pending", leverage=leverage,
         trail_distance=trail_distance,
         commission_paid=cm["commission"], slippage_applied=0.0,
@@ -571,6 +573,11 @@ def modify_trade(trade_id):
     for field in ("stop_loss", "take_profit", "trail_distance", "entry_order_price"):
         if field in body:
             setattr(trade, field, body[field])
+    # A resting order hasn't declared its risk yet — until it fills, moving the
+    # stop is still planning, so the entry stop moves with it. Once the position
+    # is open, entry_stop_loss is frozen and widening becomes visible.
+    if trade.status == "pending" and "stop_loss" in body:
+        trade.entry_stop_loss = body["stop_loss"]
     db.session.commit()
     return jsonify(_trade_dict(trade))
 
@@ -867,6 +874,16 @@ def _finalize_session(session):
         progress.sessions_scored = (progress.sessions_scored or 0) + 1
         progress.discipline_sum = (progress.discipline_sum or 0.0) + discipline_score
         db.session.add(progress)
+
+    # XP for the process the learner demonstrated (Phase 1). Paper earns too,
+    # subject to a per-day ceiling; nothing here reads P&L. Idempotent by key,
+    # and unreachable on a re-finalise because that returns early above.
+    from app.engagement.awards import award_session_xp
+    from app.engagement.service import record_active_time
+    award_session_xp(session, disc)
+    if session.started_at and session.ended_at:
+        record_active_time(session.user_id,
+                           (session.ended_at - session.started_at).total_seconds())
 
     # Practice checks and paper runs use throwaway per-attempt scenarios, so they
     # don't post to a per-scenario leaderboard.

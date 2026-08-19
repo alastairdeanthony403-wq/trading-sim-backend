@@ -115,10 +115,17 @@ def submit_mission(mission_id):
     db.session.add(attempt)
     db.session.commit()
 
+    # XP is paid for the PROCESS rules actually satisfied, pass or fail. The
+    # mission's own pass/fail (and the career gating built on it) is unchanged;
+    # what changed is that a profit clause no longer earns points.
+    from app.engagement.awards import award_mission_xp
+    award = award_mission_xp(user_id, mission, session, results)
+
     return jsonify({
         "passed": passed,
         "results": results,
-        "xp_awarded": mission.xp_reward if passed else 0,
+        "xp_awarded": award["awarded"],
+        "xp_total": award["total_xp"],
         "mission": _mission_dict(mission),
     })
 
