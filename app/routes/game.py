@@ -781,7 +781,9 @@ def _finalize_session(session):
             "discipline": disc,
             "blown": session.status == "blown",
             "post_mortem": _post_mortem(session),
-            "engagement": _session_engagement(session, disc),
+            # Re-read of an already-scored session: don't consume unlocks the
+            # learner may not have been shown yet.
+            "engagement": _session_engagement(session, disc, claim_milestones=False),
         }
 
     trades = [t for t in session.trades if t.pnl is not None]
@@ -915,10 +917,10 @@ def _finalize_session(session):
     }
 
 
-def _session_engagement(session, disc):
+def _session_engagement(session, disc, claim_milestones=True):
     """Strengths / focus / XP breakdown for the results screen (Phase 2)."""
     from app.engagement.summary import session_summary
-    return session_summary(session, disc)
+    return session_summary(session, disc, claim_milestones=claim_milestones)
 
 
 def _post_mortem(session):

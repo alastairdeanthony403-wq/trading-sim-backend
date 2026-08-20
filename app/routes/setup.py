@@ -373,3 +373,34 @@ def migrate_completed_lessons():
         return jsonify({"status": "ok", "message": "completed_lessons column added"})
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)}), 500
+
+
+@bp.route("/setup/seed-milestones", methods=["POST"])
+def seed_milestones():
+    """Upsert the milestone catalogue by code. Idempotent — safe after every
+    deploy that changes app/engagement/milestones.py."""
+    if not _authorized():
+        return jsonify({"error": "unauthorized"}), 401
+
+    from app.models.engagement import Milestone
+    from app.engagement.milestones import SEED_MILESTONES
+
+    created, updated = 0, 0
+    for order, (code, name, desc, category, ttype, tvalue, icon) in enumerate(SEED_MILESTONES):
+        m = Milestone.query.filter_by(code=code).first()
+        if m is None:
+            m = Milestone(code=code)
+            db.session.add(m)
+            created += 1
+        else:
+            updated += 1
+        m.name = name
+        m.description = desc
+        m.category = category
+        m.threshold_type = ttype
+        m.threshold_value = float(tvalue)
+        m.icon_key = icon
+        m.sort_order = order
+    db.session.commit()
+    return jsonify({"status": "ok", "created": created, "updated": updated,
+                    "total": len(SEED_MILESTONES)})

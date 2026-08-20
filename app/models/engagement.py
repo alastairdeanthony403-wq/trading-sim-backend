@@ -37,6 +37,8 @@ SOURCE_TYPES = (
 
 DEFAULT_TIMEZONE = "Europe/London"
 
+MILESTONE_CATEGORIES = ("learning", "discipline", "consistency", "craft")
+
 
 class EngagementProfile(db.Model):
     __tablename__ = "engagement_profile"
@@ -88,6 +90,47 @@ class XpEvent(db.Model):
     awarded_at = db.Column(db.DateTime, nullable=False,
                            default=lambda: datetime.now(timezone.utc))
     meta = db.Column(db.JSON, nullable=True)
+
+
+class Milestone(db.Model):
+    """The catalogue. Seeded via POST /setup/seed-milestones, upserted by code.
+
+    Every milestone states exactly what unlocks it — threshold_type and
+    threshold_value are the real criteria, rendered verbatim to the learner
+    while still locked. There are deliberately no hidden, mystery or randomised
+    unlocks in this table, and nothing here can be bought.
+    """
+    __tablename__ = "milestone"
+
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(64), unique=True, nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    # learning | discipline | consistency | craft
+    category = db.Column(db.String(16), nullable=False)
+    # a key in app.engagement.milestones.METRICS
+    threshold_type = db.Column(db.String(40), nullable=False)
+    threshold_value = db.Column(db.Float, nullable=False)
+    icon_key = db.Column(db.String(32), nullable=True)
+    sort_order = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+
+
+class UserMilestone(db.Model):
+    __tablename__ = "user_milestone"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(120), nullable=False, index=True)
+    milestone_id = db.Column(db.Integer, db.ForeignKey("milestone.id"), nullable=False)
+    unlocked_at = db.Column(db.DateTime, nullable=False,
+                            default=lambda: datetime.now(timezone.utc))
+    # NULL until the learner has been shown the unlock once.
+    seen_at = db.Column(db.DateTime, nullable=True)
+
+    milestone = db.relationship("Milestone")
+
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "milestone_id", name="uq_user_milestone"),
+    )
 
 
 class ActivityDay(db.Model):

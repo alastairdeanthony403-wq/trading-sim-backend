@@ -12,7 +12,8 @@ it sits in, so the UI never shows two disagreeing "levels".
 from flask import Blueprint, jsonify, request
 
 from app import db
-from app.models.engagement import EngagementProfile, GOAL_TYPES, XpEvent
+from app.models.engagement import (EngagementProfile, GOAL_TYPES, Milestone,
+                                   UserMilestone, XpEvent)
 from app.engagement.awards import import_legacy_xp
 from app.engagement.day import local_date
 from app.engagement.feedback import consistency, goal_progress, next_goal
@@ -121,6 +122,32 @@ def get_summary(user_id):
         "consistency": consistency(user_id, profile),
         "today": _day_view(today),
         "profile": _profile_view(profile),
+    })
+
+
+@bp.route("/engagement/milestones/<string:user_id>", methods=["GET"])
+def get_milestones(user_id):
+    """The gallery. Locked milestones ship their REAL criteria and the learner's
+    live progress toward them — there are no teasers or mystery entries here,
+    so the payload is identical in shape whether locked or not."""
+    from app.engagement import milestones as ms
+
+    catalogue = Milestone.query.order_by(Milestone.sort_order, Milestone.id).all()
+    owned = {um.milestone_id: um for um in
+             UserMilestone.query.filter_by(user_id=user_id).all()}
+    metrics = ms.compute_metrics(user_id)
+
+    items = [ms.view(m, owned.get(m.id), metrics) for m in catalogue]
+    by_category = {}
+    for item in items:
+        by_category.setdefault(item["category"], []).append(item)
+
+    return jsonify({
+        "user_id": user_id,
+        "unlocked_count": sum(1 for i in items if i["unlocked"]),
+        "total_count": len(items),
+        "categories": by_category,
+        "milestones": items,
     })
 
 

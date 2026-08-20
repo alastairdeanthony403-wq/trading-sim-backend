@@ -108,8 +108,15 @@ def next_goal(user_id, profile, row):
     }
 
 
-def feedback_payload(user_id, xp_awarded=0):
-    """The block every XP-paying action returns. One shape, one confirmation."""
+def feedback_payload(user_id, xp_awarded=0, claim_milestones=True):
+    """The block every XP-paying action returns. One shape, one confirmation.
+
+    `claim_milestones` marks the returned unlocks as shown. Re-reads of an
+    already-finished session pass False, so re-opening a results screen can't
+    silently swallow a celebration the learner never saw.
+    """
+    from app.engagement import milestones
+
     profile = get_or_create_profile(user_id)
     row = get_or_create_day(user_id, local_date(profile.timezone))
     return {
@@ -117,7 +124,7 @@ def feedback_payload(user_id, xp_awarded=0):
         "xp_total": total_xp(user_id),
         "goal_progress": goal_progress(profile, row),
         "next_goal": next_goal(user_id, profile, row),
-        "milestones_unlocked": [],      # Phase 3 fills this; shape fixed now
+        "milestones_unlocked": milestones.unseen(user_id, claim=claim_milestones),
     }
 
 
