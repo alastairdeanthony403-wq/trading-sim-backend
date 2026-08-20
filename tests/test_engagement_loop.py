@@ -66,7 +66,13 @@ def _assert_feedback(label, fb):
     check(f"{label}: next_goal keys exact", set(fb["next_goal"]) == NEXT_KEYS)
     check(f"{label}: xp_awarded is an int", isinstance(fb["xp_awarded"], int))
     check(f"{label}: xp_total is an int", isinstance(fb["xp_total"], int))
-    check(f"{label}: milestones present and empty", fb["milestones_unlocked"] == [])
+    # Phase 2 pinned this to []; Phase 3 populates it. What the contract
+    # guarantees is that it is always a list, and that anything in it states
+    # the criteria that unlocked it.
+    check(f"{label}: milestones is a list", isinstance(fb["milestones_unlocked"], list))
+    check(f"{label}: every unlock states its criteria",
+          all(m.get("criteria") and m.get("name")
+              for m in fb["milestones_unlocked"]))
 
 
 # ── 1. the feedback contract ───────────────────────────────────────────────

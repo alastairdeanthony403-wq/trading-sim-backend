@@ -81,7 +81,7 @@ def xp_breakdown(session):
             for e in events]
 
 
-def session_summary(session, discipline):
+def session_summary(session, discipline, claim_milestones=True):
     """The engagement block attached to every finished session."""
     breakdown = xp_breakdown(session)
     earned = sum(e["amount"] for e in breakdown)
@@ -90,5 +90,6 @@ def session_summary(session, discipline):
         "focus": session_focus(session, discipline),
         "xp_breakdown": breakdown,
         "xp_session_total": earned,
-        "feedback": feedback_payload(session.user_id, earned),
+        "feedback": feedback_payload(session.user_id, earned,
+                                     claim_milestones=claim_milestones),
     }
