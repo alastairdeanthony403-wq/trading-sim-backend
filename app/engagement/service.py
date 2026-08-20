@@ -84,8 +84,9 @@ def award_xp(user_id, source_type, source_id, amount, idempotency_key, meta=None
 
     # Milestones are evaluated server-side after every ledger write and every
     # activity rollup, so an unlock can never depend on the client asking.
-    from app.engagement import milestones
+    from app.engagement import milestones, streaks
     milestones.evaluate(user_id)
+    streaks.recompute(user_id)
 
     return {"awarded": amount, "duplicate": False,
             "total_xp": total_xp(user_id), "activity_date": day.isoformat()}
@@ -104,8 +105,9 @@ def record_active_time(user_id, seconds):
         return
     profile = get_or_create_profile(user_id)
     _roll_up(profile, local_date(profile.timezone), active_seconds=seconds)
-    from app.engagement import milestones
+    from app.engagement import milestones, streaks
     milestones.evaluate(user_id)
+    streaks.recompute(user_id)
 
 
 # ── daily rollup ───────────────────────────────────────────────────────────

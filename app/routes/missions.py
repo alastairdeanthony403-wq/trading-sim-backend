@@ -1,6 +1,6 @@
 import os
 import hashlib
-from datetime import date, timedelta
+from datetime import date
 from flask import Blueprint, jsonify, request
 from app import db
 from app.models.mission import Mission, MissionAttempt
@@ -32,26 +32,11 @@ def _daily_mission():
     return pool[idx]
 
 
-def _daily_streak(user_id):
-    """Consecutive days (ending today or yesterday) with a passed daily attempt."""
-    rows = (db.session.query(MissionAttempt.challenge_date)
-            .filter(MissionAttempt.user_id == user_id,
-                    MissionAttempt.is_daily.is_(True),
-                    MissionAttempt.passed.is_(True))
-            .distinct().all())
-    days = {r[0] for r in rows if r[0]}
-    if not days:
-        return 0
-    streak = 0
-    cur = date.today()
-    if cur.isoformat() not in days:          # allow the streak to still count through yesterday
-        cur = cur - timedelta(days=1)
-        if cur.isoformat() not in days:
-            return 0
-    while cur.isoformat() in days:
-        streak += 1
-        cur = cur - timedelta(days=1)
-    return streak
+# The old daily streak lived here: consecutive days with a passed daily
+# challenge, computed from date.today() (server-local, i.e. UTC on Render) and
+# hard-reset to zero on a single miss. It was replaced in Phase 4 by
+# app.engagement.streaks — weekly, timezone-correct, with rest days and a soft
+# reset — and is exposed on /engagement/summary rather than here.
 
 
 @bp.route("/missions", methods=["GET"])
@@ -63,10 +48,9 @@ def list_missions():
 @bp.route("/missions/daily", methods=["GET"])
 def daily_mission():
     m = _daily_mission()
-    user_id = request.args.get("user_id", "guest")
     if not m:
-        return jsonify({"mission": None, "date": _today(), "streak": _daily_streak(user_id)})
-    return jsonify({"mission": _mission_dict(m), "date": _today(), "streak": _daily_streak(user_id)})
+        return jsonify({"mission": None, "date": _today()})
+    return jsonify({"mission": _mission_dict(m), "date": _today()})
 
 
 @bp.route("/missions/daily/leaderboard", methods=["GET"])

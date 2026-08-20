@@ -133,6 +133,36 @@ class UserMilestone(db.Model):
     )
 
 
+class StreakState(db.Model):
+    """Consistency, tracked without a loss-aversion trap.
+
+    Deliberate design, all of it testable:
+
+      * The period is a WEEK by default, and the target is "N active days this
+        week" — a consistency signal that never demands daily attendance.
+      * Missing a period silently consumes a rest day (freeze) if one is
+        available. The learner is told afterwards, positively.
+      * Out of freezes, the streak SOFT-RESETS to the highest tier below it
+        (12 → 8), never to zero, and best_count is preserved forever.
+      * This value is display-only. Nothing in the product may gate on it — not
+        content, not XP, not milestones. There is a test that proves it.
+    """
+    __tablename__ = "streak_state"
+
+    user_id = db.Column(db.String(120), primary_key=True)
+    current_count = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    best_count = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    # "week" (default) or "day"
+    unit = db.Column(db.String(8), nullable=False, default="week", server_default="week")
+    # The last period folded into current_count, e.g. "2026-W34" or "2026-08-20".
+    last_counted_period = db.Column(db.String(16), nullable=True)
+    freezes_available = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    # {"granted_month": "2026-08", "used": [{"period": ..., "at": ...}]}
+    freezes_used = db.Column(db.JSON, nullable=True)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
+                           onupdate=lambda: datetime.now(timezone.utc))
+
+
 class ActivityDay(db.Model):
     """One row per learner per LOCAL date (see app.engagement.day)."""
     __tablename__ = "activity_day"

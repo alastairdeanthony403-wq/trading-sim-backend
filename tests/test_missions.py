@@ -59,7 +59,7 @@ def test_daily_is_deterministic():
     a = client.get("/missions/daily?user_id=x").get_json()
     b = client.get("/missions/daily?user_id=x").get_json()
     check("daily mission is stable within a day", a["mission"]["id"] == b["mission"]["id"])
-    check("daily reports a date + streak", "date" in a and "streak" in a)
+    check("daily reports a mission and a date", "mission" in a and "date" in a)
 
 
 def test_mission_pass():
@@ -90,20 +90,25 @@ def test_mission_fail_no_stop():
     check("failing rule is reported", any(not x["passed"] for x in r["results"]))
 
 
-def test_live_status_and_streak():
+def test_live_status_and_daily_challenge():
     sid = _scenario(RISE)
     s = client.post(f"/scenarios/{sid}/start", json={"user_id": "d"}).get_json()["session_id"]
     mid = _mission_id("first-stops")
     live = client.get(f"/sessions/{s}/mission/{mid}/status").get_json()
     check("live status returns rule results", isinstance(live["results"], list) and len(live["results"]) >= 1)
-    # complete a daily and confirm streak increments
     t = client.post(f"/sessions/{s}/trades",
                     json={"direction": "long", "size": 10, "bar_sequence": 0, "stop_loss": 99}).get_json()
     client.post(f"/trades/{t['trade_id']}/close", json={"bar_sequence": 3})
     client.post(f"/sessions/{s}/end")
-    client.post(f"/missions/{mid}/submit", json={"session_id": s, "user_id": "d", "is_daily": True})
+    r = client.post(f"/missions/{mid}/submit",
+                    json={"session_id": s, "user_id": "d", "is_daily": True}).get_json()
+    check("a daily attempt is graded", "passed" in r)
     day = client.get("/missions/daily?user_id=d").get_json()
-    check("daily streak counts a passed day", day["streak"] >= 1)
+    check("the daily challenge still serves a mission and a date",
+          "mission" in day and "date" in day)
+    # The UTC daily streak that used to live here was replaced in Phase 4 by the
+    # timezone-correct weekly streak on /engagement/summary.
+    check("no daily streak is reported here", "streak" not in day)
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
@@ -111,7 +116,7 @@ TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 if __name__ == "__main__":
     # ordered so seeding runs first
     order = ["test_seed_and_list", "test_daily_is_deterministic", "test_mission_pass",
-             "test_mission_fail_no_stop", "test_live_status_and_streak"]
+             "test_mission_fail_no_stop", "test_live_status_and_daily_challenge"]
     failed = 0
     for name in order:
         print(name)
