@@ -202,7 +202,9 @@ def test_summary_endpoint_shape():
         check("summary keys exact",
               set(r) == {"user_id", "total_xp", "career_level", "career_level_name",
                          "next_level_name", "career_progress", "requirements",
-                         "goal", "next_goal", "consistency", "today", "profile"})
+                         "goal", "next_goal", "consistency", "streak", "today",
+                         "profile"})
+        check("the streak is marked display-only", r["streak"]["display_only"] is True)
         check("consistency keys exact",
               set(r["consistency"]) == {"week_start", "active_days", "goals_met"})
         check("career_progress is a fraction", 0.0 <= r["career_progress"] <= 1.0)

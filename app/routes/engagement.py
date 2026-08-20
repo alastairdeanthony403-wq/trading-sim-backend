@@ -17,6 +17,7 @@ from app.models.engagement import (EngagementProfile, GOAL_TYPES, Milestone,
 from app.engagement.awards import import_legacy_xp
 from app.engagement.day import local_date
 from app.engagement.feedback import consistency, goal_progress, next_goal
+from app.engagement import streaks
 from app.engagement.service import (get_or_create_profile, get_or_create_day,
                                     total_xp)
 
@@ -120,6 +121,7 @@ def get_summary(user_id):
         "goal": goal_progress(profile, today),
         "next_goal": next_goal(user_id, profile, today),
         "consistency": consistency(user_id, profile),
+        "streak": streaks.view(user_id),
         "today": _day_view(today),
         "profile": _profile_view(profile),
     })
